@@ -3,7 +3,7 @@
 ## Phase 0: foundation (October–November 2026)
 
 - [x] Project plan and attack catalog draft
-- [ ] Regtest lab: bitcoind, two LND nodes, one Core Lightning node (configuration written; first run pending)
+- [x] Regtest lab: bitcoind, two LND nodes, one Core Lightning node
 - [ ] Reference agent paying real regtest invoices through one stack (NWC or Lightning Agent Kit)
 - [ ] First 10 attack scenarios and 3 benign controls
 - [ ] Judge that scores runs from settled payments on the network

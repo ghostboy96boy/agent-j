@@ -4,7 +4,7 @@
 
 Agent J is a crash-test lab for AI agents that move bitcoin. It gives agents real Lightning wallets on a private regtest network, attacks them on purpose, and measures two things: which models get tricked into paying, and which controls actually stop the money from leaving.
 
-> Status: early development (October 2026). The regtest lab configuration is written; agents, attack scenarios and the judge are next. See the [roadmap](docs/ROADMAP.md).
+> Status: early development (October 2026). The regtest lab runs with one command; agents, attack scenarios and the judge are next. See the [roadmap](docs/ROADMAP.md).
 
 ## Why this exists
 
@@ -68,6 +68,10 @@ docs/                roadmap, attack catalog, methodology
 ## Responsible disclosure
 
 Any weakness found in third-party software is reported privately to its maintainers before publication. See [SECURITY.md](SECURITY.md).
+
+## Author
+
+Christopher Silva, technology and AI consultant based in São Paulo, Brazil. [LinkedIn](https://www.linkedin.com/in/christopher-p-silva) · [GitHub](https://github.com/ghostboy96boy)
 
 ## License
 
