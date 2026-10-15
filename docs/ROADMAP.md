@@ -4,9 +4,9 @@
 
 - [x] Project plan and attack catalog draft
 - [x] Regtest lab: bitcoind, two LND nodes, one Core Lightning node
-- [ ] Reference agent paying real regtest invoices through one stack (NWC or Lightning Agent Kit)
-- [ ] First 10 attack scenarios and 3 benign controls
-- [ ] Judge that scores runs from settled payments on the network
+- [ ] Reference agent paying real regtest invoices (generic payment tool done; Lightning Agent Kit adapter next)
+- [ ] First 10 attack scenarios and 3 benign controls (1 + 1 so far)
+- [ ] Judge that scores runs from settled payments on the network (written and tested offline; first live run pending)
 - [ ] First run with 3 models and a short technical note
 
 ## Phase 1: benchmark (months 1–3)

@@ -1,0 +1,69 @@
+"""Minimal OpenAI-compatible chat client with tool calling (stdlib only)."""
+from __future__ import annotations
+
+import json
+import time
+import urllib.error
+import urllib.request
+
+from .config import resolve
+
+
+class LLMError(RuntimeError):
+    pass
+
+
+class ChatClient:
+    def __init__(self, model: str, temperature: float = 0.0, timeout: int = 120):
+        self.model = model
+        self.base_url, self._key, self.model_id = resolve(model)
+        self.temperature = temperature
+        self.timeout = timeout
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Send one chat turn and return the assistant message dict."""
+        body = {
+            "model": self.model_id,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": self.temperature,
+        }
+        data = self._post("/chat/completions", body)
+        try:
+            return data["choices"][0]["message"]
+        except (KeyError, IndexError) as exc:
+            raise LLMError(f"Unexpected response: {json.dumps(data)[:300]}") from exc
+
+    def _post(self, path: str, body: dict, retries: int = 6) -> dict:
+        req = urllib.request.Request(
+            self.base_url + path,
+            data=json.dumps(body).encode(),
+            headers={
+                "Authorization": f"Bearer {self._key}",
+                "Content-Type": "application/json",
+                # Some providers sit behind Cloudflare, which blocks the default urllib agent.
+                "User-Agent": "agent-j/0.1",
+            },
+        )
+        delay = 5.0
+        for attempt in range(retries):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.load(resp)
+            except urllib.error.HTTPError as exc:
+                detail = exc.read()[:300].decode(errors="ignore")
+                # Free tiers rate-limit hard: back off on 429 and transient 5xx.
+                if exc.code in (429, 500, 502, 503) and attempt < retries - 1:
+                    wait = float(exc.headers.get("retry-after") or delay)
+                    time.sleep(min(wait, 60))
+                    delay *= 2
+                    continue
+                raise LLMError(f"HTTP {exc.code} from {self.model}: {detail}") from exc
+            except urllib.error.URLError as exc:
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise LLMError(f"Network error calling {self.model}: {exc}") from exc
+        raise LLMError("unreachable")

@@ -1,4 +1,4 @@
-.PHONY: up setup status down logs
+.PHONY: up setup status down logs test bench smoke
 
 up:
 	docker compose --env-file .env up -d
@@ -14,3 +14,12 @@ logs:
 
 down:
 	docker compose down -v
+
+test:
+	python3 -m unittest discover -s tests
+
+smoke:
+	python3 -m bench.run --models groq/llama-3.3-70b-versatile --scenarios b01-coffee
+
+bench:
+	python3 -m bench.run
