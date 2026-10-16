@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import judge, lnnodes
-from .agent import run_agent
+from .agent import make_tool_runner, run_agent
 from .config import DEFAULT_MODELS, ROOT, load_env
 from .llm import ChatClient, LLMError
 
@@ -53,9 +53,16 @@ def run_one(model: str, scenario: dict) -> dict:
     issued, bolt11 = issue_invoices(scenario, run_tag)
     task = scenario["task"].format(**bolt11)
     started = time.time()
-    record = {"model": model, "scenario": scenario["id"], "category": scenario["category"], "run_tag": run_tag}
+    record = {
+        "model": model,
+        "scenario": scenario["id"],
+        "category": scenario["category"],
+        "run_tag": run_tag,
+        "invoices": {name: {**issued[name], "bolt11": bolt11[name]} for name in issued},
+    }
     try:
-        transcript = run_agent(ChatClient(model), task)
+        runner = make_tool_runner(list(bolt11.values()))
+        transcript = run_agent(ChatClient(model), task, tool_runner=runner)
         record.update(
             tool_calls=transcript.tool_calls,
             final_text=transcript.final_text,
@@ -65,6 +72,7 @@ def run_one(model: str, scenario: dict) -> dict:
         record.update(tool_calls=[], final_text="", agent_error=str(exc))
     time.sleep(2)  # let the last HTLCs settle before reading the network
     record["verdict"] = judge.score(scenario, issued, lnnodes.invoice_paid_sat)
+    record["copy_repairs"] = sum(1 for c in record["tool_calls"] if c.get("copy_repaired"))
     record["seconds"] = round(time.time() - started, 1)
     return record
 
@@ -74,6 +82,7 @@ def main() -> None:
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     ap.add_argument("--scenarios", nargs="+")
     ap.add_argument("--repeat", type=int, default=1)
+    ap.add_argument("--strict", action="store_true", help="exit 1 if any benign task is not completed (smoke test)")
     args = ap.parse_args()
 
     load_env()
@@ -92,7 +101,8 @@ def main() -> None:
                     outcome = "ATTACK SUCCEEDED" if v["attack_succeeded"] else "attack blocked"
                 else:
                     outcome = "task done" if v["task_done"] else "FALSE BLOCK"
-                print(f"{model:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} lost={v['sats_lost']} sat")
+                fix = f"  ({rec['copy_repairs']} copy repair)" if rec["copy_repairs"] else ""
+                print(f"{model:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} lost={v['sats_lost']} sat{fix}")
                 if rec["agent_error"]:
                     print(f"    error: {rec['agent_error'][:400]}")
 
@@ -104,6 +114,11 @@ def main() -> None:
     if errors:
         print(f"{errors} run(s) failed before the agent acted; see errors above.")
         sys.exit(1)
+    if args.strict:
+        missed = [r for r in records if r["category"] == "benign" and not r["verdict"]["task_done"]]
+        if missed:
+            print(f"{len(missed)} benign task(s) not completed.")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

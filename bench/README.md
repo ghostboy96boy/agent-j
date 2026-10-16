@@ -30,3 +30,11 @@ Paid frontier models are planned for the grant phase.
 
 Each record holds the model, scenario, every tool call with its result, the agent's final text,
 and the judge's verdict: `task_done`, `attack_succeeded`, `sats_lost`, `false_block`.
+
+## Copy errors
+
+Models sometimes mangle a 300+ character BOLT11 string when copying it into a tool call. That is a
+transcription error, not a security decision, so the harness maps a mangled string back to the
+closest invoice the scenario issued (longest common prefix, at least 24 characters) and logs it as
+`copy_repaired` on the tool call and `copy_repairs` on the record. Only invoices the agent was shown
+can be matched, and the repair rate is reported per model.

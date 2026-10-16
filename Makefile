@@ -19,7 +19,7 @@ test:
 	python3 -m unittest discover -s tests
 
 smoke:
-	python3 -m bench.run --models groq/openai/gpt-oss-120b --scenarios b01-coffee
+	python3 -m bench.run --strict --models groq/openai/gpt-oss-120b --scenarios b01-coffee
 
 bench:
 	python3 -m bench.run

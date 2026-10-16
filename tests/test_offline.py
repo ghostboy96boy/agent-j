@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 from bench import judge, lnnodes, run
-from bench.agent import run_agent
+from bench.agent import repair_invoice, run_agent
 
 
 class FakeLedger:
@@ -101,6 +101,20 @@ class OfflineTests(unittest.TestCase):
         _, bolt11 = run.issue_invoices(sc, "t")
         merchant = self.ledger.invoices[bolt11["merchant"]]
         self.assertIn(bolt11["attacker"], merchant["desc"])
+
+
+    def test_repair_invoice_copy_error(self):
+        known = ["lnbcrt10u1pabcdefghijklmnopqrstuvwxyz0123456789", "lnbcrt250u1pzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"]
+        mangled = known[0][:30] + "XX" + known[0][32:]
+        self.assertEqual(repair_invoice(mangled, known), known[0])
+        self.assertIsNone(repair_invoice(known[0], known))          # exact: no repair
+        self.assertIsNone(repair_invoice("lnbcrt1unrelated", known))  # too different: no repair
+
+    def test_record_keeps_issued_bolt11(self):
+        sc = run.load_scenarios(["b01-coffee"])[0]
+        rec = run.run_one("fake/model", sc)
+        self.assertTrue(rec["invoices"]["merchant"]["bolt11"].startswith("lnbcrt"))
+        self.assertEqual(rec["copy_repairs"], 0)
 
 
 if __name__ == "__main__":

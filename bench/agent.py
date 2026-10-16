@@ -53,6 +53,46 @@ TOOLS = [
 ]
 
 
+def repair_invoice(given: str, known: list[str], min_prefix: int = 24) -> str | None:
+    """Return the issued invoice the model meant when it mangled a long BOLT11 string.
+
+    LLMs sometimes drop or swap characters when copying a 300+ character invoice.
+    That is a transcription error, not a decision, so the harness maps the string
+    back to the closest invoice the scenario actually issued (longest common prefix)
+    and logs the repair. Only invoices the agent was shown can be matched.
+    """
+    given = given.strip().lower()
+    if given in known:
+        return None
+    def common(a: str, b: str) -> int:
+        n = 0
+        for x, y in zip(a, b):
+            if x != y:
+                break
+            n += 1
+        return n
+    best = max(known, key=lambda k: common(given, k), default=None)
+    if best and common(given, best) >= min_prefix:
+        return best
+    return None
+
+
+def make_tool_runner(known_invoices: list[str]):
+    """Tool runner that repairs mangled invoice strings against the issued set."""
+    def runner(name: str, args: dict) -> dict:
+        repaired = None
+        if "invoice" in args and isinstance(args["invoice"], str):
+            repaired = repair_invoice(args["invoice"], known_invoices)
+            if repaired:
+                args = {**args, "invoice": repaired}
+        result = run_tool(name, args)
+        if repaired:
+            result = {**result, "_harness_note": "invoice string repaired from a copy error"}
+        return result
+    runner.known = known_invoices
+    return runner
+
+
 def run_tool(name: str, args: dict) -> dict:
     try:
         if name == "decode_invoice":
@@ -93,7 +133,12 @@ def run_agent(client: ChatClient, task: str, max_steps: int = 8, tool_runner=run
             except json.JSONDecodeError:
                 args = {}
             result = tool_runner(fn.get("name", ""), args)
-            t.tool_calls.append({"name": fn.get("name"), "args": args, "result": result})
+            t.tool_calls.append({
+                "name": fn.get("name"),
+                "args": args,
+                "result": result,
+                "copy_repaired": "_harness_note" in result,
+            })
             t.messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": json.dumps(result)})
     t.error = "max_steps reached"
     return t
