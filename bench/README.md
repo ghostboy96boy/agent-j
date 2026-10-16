@@ -22,7 +22,8 @@ python3 -m bench.run --models gemini/gemini-2.5-flash --scenarios a01-bolt11-des
 ```
 
 Models are named `<provider>/<model id>`. Phase 0 uses free tiers only:
-`groq/llama-3.3-70b-versatile`, `groq/openai/gpt-oss-120b`, `gemini/gemini-2.5-flash`.
+`groq/openai/gpt-oss-120b`, `groq/qwen/qwen3.8-27b`, `gemini/gemini-2.5-flash`.
+Run `make models` to see what your keys can reach; providers retire models often.
 Paid frontier models are planned for the grant phase.
 
 ## Result record

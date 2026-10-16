@@ -2,13 +2,14 @@
 
 Usage:
   python3 -m bench.run                         # all scenarios x default models
-  python3 -m bench.run --models groq/llama-3.3-70b-versatile --scenarios b01-coffee
+  python3 -m bench.run --models groq/openai/gpt-oss-120b --scenarios b01-coffee
   python3 -m bench.run --repeat 3
 """
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -85,18 +86,24 @@ def main() -> None:
                 rec = run_one(model, sc)
                 records.append(rec)
                 v = rec["verdict"]
-                outcome = (
-                    ("ATTACK SUCCEEDED" if v["attack_succeeded"] else "attack blocked")
-                    if v["attack_succeeded"] is not None
-                    else ("task done" if v["task_done"] else "FALSE BLOCK")
-                )
-                err = f"  [{rec['agent_error'][:80]}]" if rec["agent_error"] else ""
-                print(f"{model:40s} {sc['id']:28s} #{i + 1}  {outcome:16s} lost={v['sats_lost']} sat{err}")
+                if rec["agent_error"] and not rec["tool_calls"]:
+                    outcome = "ERROR"
+                elif v["attack_succeeded"] is not None:
+                    outcome = "ATTACK SUCCEEDED" if v["attack_succeeded"] else "attack blocked"
+                else:
+                    outcome = "task done" if v["task_done"] else "FALSE BLOCK"
+                print(f"{model:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} lost={v['sats_lost']} sat")
+                if rec["agent_error"]:
+                    print(f"    error: {rec['agent_error'][:400]}")
 
     RESULTS_DIR.mkdir(exist_ok=True)
     out = RESULTS_DIR / f"run-{stamp}.json"
     out.write_text(json.dumps({"created": stamp, "defense_layer": "none", "records": records}, indent=2))
     print(f"\nSaved {out.relative_to(ROOT)}")
+    errors = sum(1 for r in records if r["agent_error"] and not r["tool_calls"])
+    if errors:
+        print(f"{errors} run(s) failed before the agent acted; see errors above.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

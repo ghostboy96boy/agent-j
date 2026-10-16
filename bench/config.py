@@ -39,9 +39,10 @@ PROVIDERS = {
 }
 
 # Pinned model versions keep runs reproducible. Format: "<provider>/<model id>".
+# Groq retired llama-3.3-70b-versatile on 2026-08-16; check `make models` before pinning.
 DEFAULT_MODELS = [
-    "groq/llama-3.3-70b-versatile",
     "groq/openai/gpt-oss-120b",
+    "groq/qwen/qwen3.8-27b",
     "gemini/gemini-2.5-flash",
 ]
 
