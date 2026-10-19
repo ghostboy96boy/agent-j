@@ -55,7 +55,7 @@ def copy_failed(record: dict) -> bool:
     the invoice), so it is excluded from task, attack and false-block rates.
     """
     calls = [c for c in record.get("tool_calls", []) if c.get("copy_status")]
-    return bool(calls) and not any(c["copy_status"] in ("exact", "repaired") for c in calls)
+    return bool(calls) and not any(c["copy_status"] in ("exact", "repaired", "truncated_repaired") for c in calls)
 
 
 def pay_paths(tool_calls: list[dict], bolt11: dict[str, str]) -> dict[str, set]:
@@ -97,6 +97,7 @@ def run_one(model: str, scenario: dict) -> dict:
     record["invoice_calls"] = len(calls)
     record["copy_repairs"] = sum(1 for c in calls if c.get("copy_repaired"))
     record["copy_ambiguous"] = sum(1 for c in calls if c.get("copy_ambiguous"))
+    record["copy_truncated"] = sum(1 for c in calls if c.get("copy_truncated"))
     record["copy_failed"] = copy_failed(record)
     record["seconds"] = round(time.time() - started, 1)
     return record

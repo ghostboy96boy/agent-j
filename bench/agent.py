@@ -82,7 +82,16 @@ def match_invoice(given: str, known: list[str]) -> dict:
     other; in that case nothing is repaired and the call is logged as ambiguous,
     so the harness never picks a payee on the model's behalf.
 
-    Returns {"status": exact|repaired|ambiguous|no_match, "invoice", "distance", "runner_up"}.
+    Truncation is handled separately: some models stop partway through a long
+    invoice (qwen3.8-27b cut a 1,177-character invoice at exactly 1,008 every
+    time; gpt-oss-120b stopped at 555-788 characters, often with a few garbled
+    characters at the cut). The string is repaired as "truncated_repaired" when
+    it matches the start of exactly one issued invoice for at least TRUNC_MIN
+    characters and at least TRUNC_SHARE of its own length, and no other issued
+    invoice shares even half of that prefix.
+
+    Returns {"status": exact|repaired|truncated_repaired|ambiguous|no_match,
+             "invoice", "distance", "runner_up"}.
     """
     norm = given.strip().lower()
     if norm in known:
@@ -94,6 +103,9 @@ def match_invoice(given: str, known: list[str]) -> dict:
     second_d = ranked[1][0] if len(ranked) > 1 else None
     tol = max(4, int(0.05 * len(best)))
     if best_d > tol:
+        trunc = match_truncation(norm, known)
+        if trunc:
+            return {"status": "truncated_repaired", "invoice": trunc, "distance": best_d, "runner_up": second_d}
         return {"status": "no_match", "invoice": None, "distance": best_d, "runner_up": second_d}
     margin = max(4, best_d)
     if second_d is not None and second_d - best_d < margin:
@@ -101,10 +113,37 @@ def match_invoice(given: str, known: list[str]) -> dict:
     return {"status": "repaired", "invoice": best, "distance": best_d, "runner_up": second_d}
 
 
+TRUNC_MIN = 100
+TRUNC_SHARE = 0.9
+REPAIRED = ("repaired", "truncated_repaired")
+
+
+def common_prefix(a: str, b: str) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def match_truncation(given: str, known: list[str]) -> str | None:
+    """The single issued invoice whose start `given` reproduces, if unambiguous."""
+    scored = [(common_prefix(given, k), k) for k in known]
+    hits = [(n, k) for n, k in scored if n >= TRUNC_MIN and n >= TRUNC_SHARE * len(given) and len(k) > n]
+    if len(hits) != 1:
+        return None
+    n, hit = hits[0]
+    others = [m for m, k in scored if k != hit]
+    if others and max(others) >= n / 2:
+        return None
+    return hit
+
+
 def repair_invoice(given: str, known: list[str]) -> str | None:
     """Return the repaired invoice, or None if the string is exact, ambiguous or unmatched."""
     m = match_invoice(given, known)
-    return m["invoice"] if m["status"] == "repaired" else None
+    return m["invoice"] if m["status"] in REPAIRED else None
 
 
 def make_tool_runner(known_invoices: list[str]):
@@ -119,7 +158,7 @@ def make_tool_runner(known_invoices: list[str]):
         if "invoice" in args and isinstance(args["invoice"], str):
             m = match_invoice(args["invoice"], known_invoices)
             meta = {"copy_status": m["status"], "copy_distance": m["distance"]}
-            if m["status"] == "repaired":
+            if m["status"] in REPAIRED:
                 meta["invoice_used"] = m["invoice"]
                 args = {**args, "invoice": m["invoice"]}
             elif m["status"] == "exact":
@@ -177,7 +216,8 @@ def run_agent(client: ChatClient, task: str, max_steps: int = 8, tool_runner=run
                 "args": args,
                 "result": result,
                 **meta,
-                "copy_repaired": meta.get("copy_status") == "repaired",
+                "copy_repaired": meta.get("copy_status") in REPAIRED,
+                "copy_truncated": meta.get("copy_status") == "truncated_repaired",
                 "copy_ambiguous": meta.get("copy_status") == "ambiguous",
             })
             t.messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": json.dumps(result)})

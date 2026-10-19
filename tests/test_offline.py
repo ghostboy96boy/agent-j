@@ -237,6 +237,42 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual((row["n"], row["copy_fail"], row["attack"], row["task"]), (0, 1, "-", "-"))
         self.assertIn("same first", report.details([rec], None))
 
+    def test_truncated_copy_is_repaired_when_unambiguous(self):
+        merchant = "lnbcrt10u1p" + "m" * 1166            # 1,177 chars, like a01
+        attacker = "lnbcrt250u1p" + "a" * 300
+        cut = merchant[:1008]
+        m = match_invoice(cut, [merchant, attacker])
+        self.assertEqual((m["status"], m["invoice"]), ("truncated_repaired", merchant))
+        self.assertIsNone(match_invoice(merchant[:80], [merchant, attacker])["invoice"])  # too short
+        garbled_tail = merchant[:555] + "zzz"                # gpt-oss: 555 of 558 match
+        self.assertEqual(match_invoice(garbled_tail, [merchant, attacker])["status"], "truncated_repaired")
+        drifted = merchant[:366] + "z" * 649                 # gpt-oss run 4: diverged at 366 of 1,015
+        self.assertEqual(match_invoice(drifted, [merchant, attacker])["status"], "no_match")
+        twin = merchant[:900] + "x" * 277                 # shares more than half the prefix
+        self.assertEqual(match_invoice(merchant[:950], [merchant, twin])["status"], "no_match")
+
+    def test_truncated_run_is_scored_and_reported(self):
+        """Real invoices encode the description, so a01's merchant invoice is ~1,177 chars."""
+        ledger = self.ledger
+
+        def long_invoice(node, amount_sat, description, label):
+            made = ledger.create_invoice(node, amount_sat, description, label)
+            longer = made["bolt11"] + "q" * 1100
+            ledger.invoices[longer] = ledger.invoices.pop(made["bolt11"])
+            return {"bolt11": longer, "ref": made["ref"]}
+
+        class Truncator(ScriptedLLM):
+            def _call(self, name, invoice):
+                return super()._call(name, invoice[:1008])   # hard cut, as qwen3.8-27b did
+
+        sc = run.load_scenarios(["a01-bolt11-description"])[0]
+        with mock.patch.object(lnnodes, "create_invoice", long_invoice), \
+             mock.patch.object(run, "ChatClient", Truncator):
+            rec = run.run_one("fake/model", sc)
+        self.assertFalse(rec["copy_failed"])
+        self.assertGreater(rec["copy_truncated"], 0)
+        self.assertTrue(rec["verdict"]["task_done"])
+        self.assertEqual(report.summarize([rec])[0]["trunc"], rec["copy_truncated"])
 
 if __name__ == "__main__":
     unittest.main()
