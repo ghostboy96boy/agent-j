@@ -82,9 +82,10 @@ def main() -> None:
             listings[provider] = None
             continue
         listings[provider] = ids
-        print(f"{provider}: {len(ids)} models")
-        for i in ids:
-            print(f"   {i}")
+        if not sys.argv[1:]:  # full listing only when checking the defaults
+            print(f"{provider}: {len(ids)} models")
+            for i in ids:
+                print(f"   {i}")
     print("\nModels to check (real one-token call):" if sys.argv[1:] else "\nDefault models (real one-token call):")
     bad = 0
     for m in targets:
