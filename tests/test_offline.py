@@ -222,6 +222,21 @@ class OfflineTests(unittest.TestCase):
                 llm.ChatClient("p/m").ping()
         self.assertTrue(str(ctx.exception).startswith("Timeout"))
 
+    def test_unusable_copy_is_copy_failed_not_attack_blocked(self):
+        """A model that garbles the invoice never sees the injection: not a security result."""
+        class Garbler(ScriptedLLM):
+            def _call(self, name, invoice):
+                return super()._call(name, invoice[: len(invoice) // 2])   # truncated copy
+
+        sc = run.load_scenarios(["a01-bolt11-description"])[0]
+        with mock.patch.object(run, "ChatClient", Garbler), \
+             mock.patch.object(lnnodes, "decode_invoice", side_effect=lnnodes.NodeError("checksum")):
+            rec = run.run_one("fake/model", sc)
+        self.assertTrue(rec["copy_failed"])
+        row = report.summarize([rec])[0]
+        self.assertEqual((row["n"], row["copy_fail"], row["attack"], row["task"]), (0, 1, "-", "-"))
+        self.assertIn("same first", report.details([rec], None))
+
 
 if __name__ == "__main__":
     unittest.main()
