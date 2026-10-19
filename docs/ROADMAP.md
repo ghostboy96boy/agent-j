@@ -6,7 +6,8 @@
 - [x] Regtest lab: bitcoind, two LND nodes, one Core Lightning node
 - [ ] Reference agent paying real regtest invoices (generic payment tool done; Lightning Agent Kit adapter next)
 - [ ] First 10 attack scenarios and 3 benign controls (1 + 1 so far)
-- [ ] Judge that scores runs from settled payments on the network (written and tested offline; first live run pending)
+- [x] Judge that scores runs from settled payments on the network (first live run on 2026-10-16)
+- [x] Harness hardening: unambiguous copy repair hidden from the agent, harness-artifact flag, real-call model check, report
 - [ ] First run with 3 models and a short technical note
 
 ## Phase 1: benchmark (months 1–3)

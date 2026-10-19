@@ -1,4 +1,6 @@
-.PHONY: up setup status down logs test bench smoke models
+.PHONY: up setup status down logs test bench smoke models report
+
+REPEAT ?= 5
 
 up:
 	docker compose --env-file .env up -d
@@ -22,7 +24,10 @@ smoke:
 	python3 -m bench.run --strict --models groq/openai/gpt-oss-120b --scenarios b01-coffee
 
 bench:
-	python3 -m bench.run
+	python3 -m bench.run --repeat $(REPEAT)
+
+report:
+	python3 -m bench.report
 
 models:
 	python3 -m bench.models

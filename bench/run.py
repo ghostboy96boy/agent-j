@@ -48,6 +48,17 @@ def issue_invoices(scenario: dict, run_tag: str) -> tuple[dict, dict]:
     return issued, bolt11
 
 
+def pay_paths(tool_calls: list[dict], bolt11: dict[str, str]) -> dict[str, set]:
+    """For each issued invoice, the copy statuses of the pay calls that targeted it."""
+    by_string = {v: k for k, v in bolt11.items()}
+    paths: dict[str, set] = {}
+    for c in tool_calls:
+        name = by_string.get(c.get("invoice_used") or "")
+        if c.get("name") == "pay_invoice" and name:
+            paths.setdefault(name, set()).add(c["copy_status"])
+    return paths
+
+
 def run_one(model: str, scenario: dict) -> dict:
     run_tag = uuid.uuid4().hex[:8]
     issued, bolt11 = issue_invoices(scenario, run_tag)
@@ -71,8 +82,11 @@ def run_one(model: str, scenario: dict) -> dict:
     except LLMError as exc:
         record.update(tool_calls=[], final_text="", agent_error=str(exc))
     time.sleep(2)  # let the last HTLCs settle before reading the network
-    record["verdict"] = judge.score(scenario, issued, lnnodes.invoice_paid_sat)
-    record["copy_repairs"] = sum(1 for c in record["tool_calls"] if c.get("copy_repaired"))
+    record["verdict"] = judge.score(scenario, issued, lnnodes.invoice_paid_sat, pay_paths(record["tool_calls"], bolt11))
+    calls = [c for c in record["tool_calls"] if c.get("copy_status")]
+    record["invoice_calls"] = len(calls)
+    record["copy_repairs"] = sum(1 for c in calls if c.get("copy_repaired"))
+    record["copy_ambiguous"] = sum(1 for c in calls if c.get("copy_ambiguous"))
     record["seconds"] = round(time.time() - started, 1)
     return record
 
@@ -99,9 +113,13 @@ def main() -> None:
                     outcome = "ERROR"
                 elif v["attack_succeeded"] is not None:
                     outcome = "ATTACK SUCCEEDED" if v["attack_succeeded"] else "attack blocked"
+                    if v.get("harness_artifact"):
+                        outcome = "HARNESS ARTIFACT"
                 else:
                     outcome = "task done" if v["task_done"] else "FALSE BLOCK"
-                fix = f"  ({rec['copy_repairs']} copy repair)" if rec["copy_repairs"] else ""
+                fix = f"  ({rec['copy_repairs']}/{rec['invoice_calls']} copy repair)" if rec["copy_repairs"] else ""
+                if rec["copy_ambiguous"]:
+                    fix += f"  ({rec['copy_ambiguous']} ambiguous copy)"
                 print(f"{model:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} lost={v['sats_lost']} sat{fix}")
                 if rec["agent_error"]:
                     print(f"    error: {rec['agent_error'][:400]}")
@@ -109,7 +127,7 @@ def main() -> None:
     RESULTS_DIR.mkdir(exist_ok=True)
     out = RESULTS_DIR / f"run-{stamp}.json"
     out.write_text(json.dumps({"created": stamp, "defense_layer": "none", "records": records}, indent=2))
-    print(f"\nSaved {out.relative_to(ROOT)}")
+    print(f"\nSaved {out.relative_to(ROOT)}  (summary: python3 -m bench.report {out.relative_to(ROOT)})")
     errors = sum(1 for r in records if r["agent_error"] and not r["tool_calls"])
     if errors:
         print(f"{errors} run(s) failed before the agent acted; see errors above.")

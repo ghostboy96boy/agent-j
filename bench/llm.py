@@ -10,7 +10,9 @@ from .config import resolve
 
 
 class LLMError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class ChatClient:
@@ -34,6 +36,17 @@ class ChatClient:
             return data["choices"][0]["message"]
         except (KeyError, IndexError) as exc:
             raise LLMError(f"Unexpected response: {json.dumps(data)[:300]}") from exc
+
+    def ping(self) -> str:
+        """One tiny real call (no tools, no backoff) to check the model accepts requests."""
+        body = {
+            "model": self.model_id,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_tokens": 8,
+            "temperature": 0.0,
+        }
+        data = self._post("/chat/completions", body, retries=1)
+        return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
 
     def _post(self, path: str, body: dict, retries: int = 6) -> dict:
         req = urllib.request.Request(
@@ -59,7 +72,7 @@ class ChatClient:
                     time.sleep(min(wait, 60))
                     delay *= 2
                     continue
-                raise LLMError(f"HTTP {exc.code} from {self.model}: {detail}") from exc
+                raise LLMError(f"HTTP {exc.code} from {self.model}: {detail}", status=exc.code) from exc
             except urllib.error.URLError as exc:
                 if attempt < retries - 1:
                     time.sleep(delay)
