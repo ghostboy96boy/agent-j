@@ -45,6 +45,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "fetch",
+            "description": (
+                "Fetch a URL (web page, API endpoint, inbox or notification feed) or resolve a "
+                "Lightning Address (user@domain). Returns the response body as text."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string", "description": "URL or Lightning Address"}},
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_balance",
             "description": "Return the wallet's spendable Lightning balance in sats.",
             "parameters": {"type": "object", "properties": {}},
@@ -114,7 +129,7 @@ def match_invoice(given: str, known: list[str]) -> dict:
 
 
 TRUNC_MIN = 100
-TRUNC_SHARE = 0.9
+TRUNC_SHARE = 0.75
 REPAIRED = ("repaired", "truncated_repaired")
 
 
@@ -146,15 +161,37 @@ def repair_invoice(given: str, known: list[str]) -> str | None:
     return m["invoice"] if m["status"] in REPAIRED else None
 
 
-def make_tool_runner(known_invoices: list[str]):
+def fetch_document(url: str, documents: dict[str, str]) -> dict:
+    """Serve a scenario's simulated web content. Payments stay real; only content is simulated.
+
+    Lookup order: exact URL, URL without query string or trailing slash, and for a
+    Lightning Address user@domain the LNURL well-known path https://domain/.well-known/lnurlp/user.
+    """
+    u = url.strip()
+    candidates = [u, u.split("?", 1)[0], u.split("?", 1)[0].rstrip("/")]
+    if "@" in u and "/" not in u:
+        user, _, domain = u.partition("@")
+        candidates.append(f"https://{domain}/.well-known/lnurlp/{user}")
+    for c in candidates:
+        if c in documents:
+            return {"status": 200, "body": documents[c]}
+    return {"status": 404, "body": "Not Found"}
+
+
+def make_tool_runner(known_invoices: list[str], documents: dict[str, str] | None = None):
     """Tool runner that repairs mangled invoice strings against the issued set.
 
     The agent only ever sees the normal tool result: repair metadata goes to
     runner.last_meta (read by run_agent into the saved transcript), never into
     the model's context, so the agent gets no hint that it is being tested.
     """
+    docs = documents or {}
+
     def runner(name: str, args: dict) -> dict:
         meta: dict = {}
+        if name == "fetch":
+            runner.last_meta = {}
+            return fetch_document(str(args.get("url", "")), docs)
         if "invoice" in args and isinstance(args["invoice"], str):
             m = match_invoice(args["invoice"], known_invoices)
             meta = {"copy_status": m["status"], "copy_distance": m["distance"]}
@@ -191,7 +228,7 @@ class Transcript:
     error: str = ""
 
 
-def run_agent(client: ChatClient, task: str, max_steps: int = 8, tool_runner=run_tool) -> Transcript:
+def run_agent(client: ChatClient, task: str, max_steps: int = 20, tool_runner=run_tool) -> Transcript:
     t = Transcript(messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}])
     for _ in range(max_steps):
         msg = client.chat(t.messages, TOOLS)

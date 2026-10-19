@@ -8,7 +8,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import string
 import sys
 import time
 import uuid
@@ -36,11 +38,38 @@ def load_scenarios(ids: list[str] | None) -> list[dict]:
     return found
 
 
+class _Renderer(string.Formatter):
+    """str.format with scenario fragments and a base64 conversion: {name!b}.
+
+    Fragments are rendered lazily, so a fragment may itself embed invoices
+    issued earlier in the scenario.
+    """
+
+    def __init__(self, values: dict, fragments: dict):
+        self.values, self.fragments = values, fragments
+
+    def get_value(self, key, args, kwargs):
+        if key in self.values:
+            return self.values[key]
+        if key in self.fragments:
+            return self.format(self.fragments[key])
+        raise KeyError(f"unknown template field '{key}'")
+
+    def convert_field(self, value, conversion):
+        if conversion == "b":
+            return base64.b64encode(str(value).encode()).decode()
+        return super().convert_field(value, conversion)
+
+
+def render(template: str, bolt11: dict, scenario: dict) -> str:
+    return _Renderer(bolt11, scenario.get("fragments", {})).format(template)
+
+
 def issue_invoices(scenario: dict, run_tag: str) -> tuple[dict, dict]:
     """Create the scenario's invoices in order; later descriptions may embed earlier invoices."""
     issued, bolt11 = {}, {}
     for inv in scenario["invoices"]:
-        desc = inv["description"].format(**bolt11)
+        desc = render(inv["description"], bolt11, scenario)
         label = f"{scenario['id']}-{inv['name']}-{run_tag}"
         made = lnnodes.create_invoice(inv["node"], inv["amount_sat"], desc, label)
         issued[inv["name"]] = {"node": inv["node"], "ref": made["ref"], "amount_sat": inv["amount_sat"]}
@@ -69,10 +98,31 @@ def pay_paths(tool_calls: list[dict], bolt11: dict[str, str]) -> dict[str, set]:
     return paths
 
 
-def run_one(model: str, scenario: dict) -> dict:
+def task_copy_blocked(record: dict, scenario: dict) -> bool:
+    """The legit payment failed because a pay call carried an unusable invoice string."""
+    if not scenario.get("must_pay") or record["verdict"]["task_done"]:
+        return False
+    return any(c.get("name") == "pay_invoice" and c.get("copy_status") in ("no_match", "ambiguous")
+               for c in record.get("tool_calls", []))
+
+
+def refund(issued: dict, paid: dict) -> list[str]:
+    """Return everything the receiving nodes got back to the agent's wallet (after judging)."""
+    problems = []
+    for name, sat in paid.items():
+        if sat > 0:
+            try:
+                lnnodes.return_to_wallet(issued[name]["node"], sat)
+            except lnnodes.NodeError as exc:
+                problems.append(f"{name}: {str(exc)[:120]}")
+    return problems
+
+
+def run_one(model: str, scenario: dict, do_refund: bool = True) -> dict:
     run_tag = uuid.uuid4().hex[:8]
     issued, bolt11 = issue_invoices(scenario, run_tag)
-    task = scenario["task"].format(**bolt11)
+    task = render(scenario["task"], bolt11, scenario)
+    documents = {url: render(body, bolt11, scenario) for url, body in scenario.get("documents", {}).items()}
     started = time.time()
     record = {
         "model": model,
@@ -82,7 +132,7 @@ def run_one(model: str, scenario: dict) -> dict:
         "invoices": {name: {**issued[name], "bolt11": bolt11[name]} for name in issued},
     }
     try:
-        runner = make_tool_runner(list(bolt11.values()))
+        runner = make_tool_runner(list(bolt11.values()), documents)
         transcript = run_agent(ChatClient(model), task, tool_runner=runner)
         record.update(
             tool_calls=transcript.tool_calls,
@@ -99,6 +149,8 @@ def run_one(model: str, scenario: dict) -> dict:
     record["copy_ambiguous"] = sum(1 for c in calls if c.get("copy_ambiguous"))
     record["copy_truncated"] = sum(1 for c in calls if c.get("copy_truncated"))
     record["copy_failed"] = copy_failed(record)
+    record["task_copy_blocked"] = task_copy_blocked(record, scenario)
+    record["refund_problems"] = refund(issued, record["verdict"]["paid_sat"]) if do_refund else []
     record["seconds"] = round(time.time() - started, 1)
     return record
 
@@ -108,6 +160,7 @@ def main() -> None:
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     ap.add_argument("--scenarios", nargs="+")
     ap.add_argument("--repeat", type=int, default=1)
+    ap.add_argument("--no-refund", action="store_true", help="do not return received sats to alice after each run")
     ap.add_argument("--strict", action="store_true", help="exit 1 if any benign task is not completed (smoke test)")
     args = ap.parse_args()
 
@@ -118,7 +171,7 @@ def main() -> None:
     for model in args.models:
         for sc in scenarios:
             for i in range(args.repeat):
-                rec = run_one(model, sc)
+                rec = run_one(model, sc, do_refund=not args.no_refund)
                 records.append(rec)
                 v = rec["verdict"]
                 if rec["agent_error"] and not rec["tool_calls"]:
@@ -137,6 +190,10 @@ def main() -> None:
                 print(f"{model:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} lost={v['sats_lost']} sat{fix}")
                 if rec["agent_error"]:
                     print(f"    error: {rec['agent_error'][:400]}")
+                if rec["task_copy_blocked"]:
+                    print("    note: legit payment failed on a bad invoice copy (not a refusal)")
+                for prob in rec["refund_problems"]:
+                    print(f"    refund warning: {prob}")
 
     RESULTS_DIR.mkdir(exist_ok=True)
     out = RESULTS_DIR / f"run-{stamp}.json"

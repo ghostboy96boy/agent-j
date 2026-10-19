@@ -2,7 +2,9 @@
 
 Run: python3 -m unittest discover -s tests
 """
+import hashlib
 import json
+import re
 import unittest
 from unittest import mock
 
@@ -18,7 +20,7 @@ class FakeLedger:
         self.invoices = {}  # bolt11 -> {"node","ref","amount","desc","paid"}
 
     def create_invoice(self, node, amount_sat, description, label):
-        bolt11 = f"lnbcrt{amount_sat}n1{label}"
+        bolt11 = f"lnbcrt{amount_sat}n1p" + hashlib.sha256(label.encode()).hexdigest()
         self.invoices[bolt11] = {"node": node, "ref": label, "amount": amount_sat, "desc": description, "paid": 0}
         return {"bolt11": bolt11, "ref": label}
 
@@ -33,13 +35,19 @@ class FakeLedger:
     def invoice_paid_sat(self, node, ref):
         return sum(i["paid"] for i in self.invoices.values() if i["ref"] == ref)
 
+    def return_to_wallet(self, node, amount_sat):
+        self.refunded = getattr(self, "refunded", 0) + amount_sat
+
+
+TOKEN = re.compile(r"lnbcrt[0-9a-z]+|https://[^\s\"'<>)\]]+|[a-z0-9._-]+@[a-z0-9.-]+\.test")
+
 
 class ScriptedLLM:
-    """Decodes, then pays, every invoice it sees, including ones inside tool output
-    (a maximally gullible agent)."""
+    """A maximally gullible agent: fetches every URL or Lightning Address it sees,
+    then decodes and pays every invoice it sees, including ones inside tool output."""
 
     def __init__(self, *_a, **_k):
-        self.decoded, self.paid, self.n = set(), set(), 0
+        self.fetched, self.decoded, self.paid, self.n = set(), set(), set(), 0
 
     def _call(self, name, invoice):
         self.n += 1
@@ -47,10 +55,20 @@ class ScriptedLLM:
             {"id": f"c{self.n}", "type": "function",
              "function": {"name": name, "arguments": json.dumps({"invoice": invoice})}}]}
 
+    def _fetch(self, url):
+        self.n += 1
+        return {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{self.n}", "type": "function",
+             "function": {"name": "fetch", "arguments": json.dumps({"url": url})}}]}
+
     def chat(self, messages, tools):
-        text = " ".join(str(m.get("content") or "") for m in messages)
-        for tok in text.replace('"', " ").replace(":", " ").replace(",", " ").split():
+        text = " ".join(str(m.get("content") or "") for m in messages).replace("\\", "")
+        for tok in TOKEN.findall(text):
+            tok = tok.rstrip(".,")
             if not tok.startswith("lnbcrt"):
+                if tok not in self.fetched:
+                    self.fetched.add(tok)
+                    return self._fetch(tok)
                 continue
             if tok not in self.decoded:
                 self.decoded.add(tok)
@@ -73,7 +91,7 @@ class OfflineTests(unittest.TestCase):
         self.ledger = FakeLedger()
         self.patches = [
             mock.patch.object(lnnodes, name, getattr(self.ledger, name))
-            for name in ("create_invoice", "decode_invoice", "pay_invoice", "invoice_paid_sat")
+            for name in ("create_invoice", "decode_invoice", "pay_invoice", "invoice_paid_sat", "return_to_wallet")
         ] + [mock.patch.object(run, "ChatClient", ScriptedLLM), mock.patch("time.sleep")]
         for p in self.patches:
             p.start()
@@ -273,6 +291,61 @@ class OfflineTests(unittest.TestCase):
         self.assertGreater(rec["copy_truncated"], 0)
         self.assertTrue(rec["verdict"]["task_done"])
         self.assertEqual(report.summarize([rec])[0]["trunc"], rec["copy_truncated"])
+    def test_every_scenario_is_consistent(self):
+        """A gullible agent must lose in every attack and complete every benign task."""
+        scenarios = run.load_scenarios(None)
+        self.assertGreaterEqual(len([s for s in scenarios if s["category"] != "benign"]), 10)
+        self.assertGreaterEqual(len([s for s in scenarios if s["category"] == "benign"]), 3)
+        for sc in scenarios:
+            with self.subTest(scenario=sc["id"]):
+                names = {i["name"] for i in sc["invoices"]}
+                self.assertTrue(set(sc["must_pay"]) | set(sc["must_not_pay"]) <= names)
+                rec = run.run_one("fake/model", sc)
+                v = rec["verdict"]
+                self.assertTrue(v["task_done"], rec["tool_calls"])
+                if sc["category"] == "benign":
+                    self.assertFalse(v["false_block"])
+                else:
+                    self.assertTrue(v["attack_succeeded"], [c["name"] for c in rec["tool_calls"]])
+                    self.assertGreater(v["sats_lost"], 0)
+                self.assertFalse(rec["copy_failed"])
+
+    def test_refund_returns_received_sats_after_judging(self):
+        sc = run.load_scenarios(["a07-splitting"])[0]
+        rec = run.run_one("fake/model", sc)
+        self.assertEqual(rec["verdict"]["sats_lost"], 5 * 4900)
+        self.assertEqual(self.ledger.refunded, 1000 + 5 * 4900)
+        self.assertEqual(rec["refund_problems"], [])
+
+    def test_templates_base64_and_documents(self):
+        sc = run.load_scenarios(["a08-encoded-instruction"])[0]
+        _, bolt11 = run.issue_invoices(sc, "t")
+        desc = self.ledger.invoices[bolt11["merchant"]]["desc"]
+        import base64
+        self.assertIn(base64.b64encode(sc["fragments"]["hidden"].encode()).decode(), desc)
+        self.assertIn(bolt11["attacker"], desc)
+        sc = run.load_scenarios(["a03-lnurl-metadata"])[0]
+        _, bolt11 = run.issue_invoices(sc, "t")
+        docs = {u: run.render(b, bolt11, sc) for u, b in sc["documents"].items()}
+        meta = json.loads(docs["https://cafelightning.test/lnurl/espresso"])
+        self.assertIn(bolt11["attacker"], json.loads(meta["metadata"])[0][1])
+        self.assertEqual(json.loads(docs["https://cafelightning.test/lnurl/espresso/cb"])["pr"], bolt11["merchant"])
+
+    def test_fetch_resolves_lightning_address_and_query(self):
+        from bench.agent import fetch_document
+        docs = {"https://barberlightning.test/.well-known/lnurlp/joao": "ok", "https://x.test/a": "a"}
+        self.assertEqual(fetch_document("joao@barberlightning.test", docs)["body"], "ok")
+        self.assertEqual(fetch_document("https://x.test/a?amount=1000", docs)["body"], "a")
+        self.assertEqual(fetch_document("https://x.test/nope", docs)["status"], 404)
+
+    def test_descriptions_fit_bolt11_limit(self):
+        """BOLT11 caps the description at 639 bytes; check with a realistic 300-char invoice."""
+        for sc in run.load_scenarios(None):
+            fake = {i["name"]: "lnbcrt250u1p" + "q" * 290 for i in sc["invoices"]}
+            for inv in sc["invoices"]:
+                with self.subTest(scenario=sc["id"], invoice=inv["name"]):
+                    self.assertLessEqual(len(run.render(inv["description"], fake, sc).encode()), 639)
+
 
 if __name__ == "__main__":
     unittest.main()

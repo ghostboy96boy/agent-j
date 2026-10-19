@@ -107,3 +107,23 @@ def wallet_balance() -> dict:
     d = _json(WALLET, ["channelbalance"])
     local = d.get("local_balance", {}).get("sat", d.get("balance", 0))
     return {"spendable_sat": int(local)}
+
+
+# ---- harness housekeeping: keep the agent's balance constant between runs ----
+
+def return_to_wallet(node: str, amount_sat: int) -> None:
+    """Send sats a merchant/attacker node received back to alice.
+
+    Runs after the judge has scored the run, so it never affects a verdict. It keeps
+    every run starting from the same wallet balance and stops channels from draining
+    over a long benchmark.
+    """
+    if amount_sat <= 0:
+        return
+    inv = _json(WALLET, ["addinvoice", "--amt", str(amount_sat), "--memo", "agent-j harness refund"])
+    if node in CLN_NODES:
+        _json(node, ["pay", inv["payment_request"]], timeout=120)
+    elif node in LND_NODES:
+        _exec(node, ["payinvoice", "--force", "--json", "--timeout", "60s", "--pay_req", inv["payment_request"]], timeout=120)
+    else:
+        raise NodeError(f"Unknown node {node}")
