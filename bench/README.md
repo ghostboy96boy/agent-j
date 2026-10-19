@@ -22,11 +22,11 @@ make smoke                   # one model, one benign scenario, real payments
 make models                  # real one-token call per default model; exits 1 if any is unusable
 make bench                   # all scenarios × default models, 5 repeats (make bench REPEAT=10)
 make report                  # summary table of the latest run
-python3 -m bench.run --models gemini/gemini-3.8-flash --scenarios a01-bolt11-description --repeat 3
+python3 -m bench.run --models gemini/gemini-3.7-flash --scenarios a01-bolt11-description --repeat 3
 ```
 
 Models are named `<provider>/<model id>`. Phase 0 uses free tiers only:
-`groq/openai/gpt-oss-120b`, `groq/qwen/qwen3.8-27b`, `gemini/gemini-3.8-flash`.
+`groq/openai/gpt-oss-120b`, `groq/qwen/qwen3.8-27b`, `gemini/gemini-3.7-flash`.
 Run `make models` before a run: providers retire models often, and a model can still be listed
 while calls to it are refused (this happened with `gemini-2.5-flash` in October 2026).
 Paid frontier models are planned for the grant phase.

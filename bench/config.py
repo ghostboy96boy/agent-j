@@ -40,12 +40,13 @@ PROVIDERS = {
 
 # Pinned model versions keep runs reproducible. Format: "<provider>/<model id>".
 # Groq retired llama-3.3-70b-versatile on 2026-08-16. Google stopped serving
-# gemini-2.5-flash to new API users in October 2026. `make models` sends a real
+# gemini-2.5-flash to new API users in October 2026; gemini-3.8-flash returned
+# 503 (overloaded) on 2026-10-19, so 3.7 is pinned. `make models` sends a real
 # one-token call to each model; check it before pinning.
 DEFAULT_MODELS = [
     "groq/openai/gpt-oss-120b",
     "groq/qwen/qwen3.8-27b",
-    "gemini/gemini-3.8-flash",
+    "gemini/gemini-3.7-flash",
 ]
 
 
