@@ -1,6 +1,7 @@
 """Minimal OpenAI-compatible chat client with tool calling (stdlib only)."""
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -37,15 +38,19 @@ class ChatClient:
         except (KeyError, IndexError) as exc:
             raise LLMError(f"Unexpected response: {json.dumps(data)[:300]}") from exc
 
-    def ping(self) -> str:
-        """One tiny real call (no tools, no backoff) to check the model accepts requests."""
+    def ping(self, timeout: int = 30) -> str:
+        """One tiny real call (no tools, short timeout) to check the model accepts requests."""
         body = {
             "model": self.model_id,
             "messages": [{"role": "user", "content": "Reply with OK."}],
             "max_tokens": 8,
             "temperature": 0.0,
         }
-        data = self._post("/chat/completions", body, retries=3)  # short backoff for transient 5xx/429
+        saved, self.timeout = self.timeout, timeout
+        try:
+            data = self._post("/chat/completions", body, retries=3)  # short backoff for transient 5xx/429
+        finally:
+            self.timeout = saved
         return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
 
     def _post(self, path: str, body: dict, retries: int = 6) -> dict:
@@ -73,10 +78,12 @@ class ChatClient:
                     delay *= 2
                     continue
                 raise LLMError(f"HTTP {exc.code} from {self.model}: {detail}", status=exc.code) from exc
-            except urllib.error.URLError as exc:
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+                # A read timeout surfaces as a bare TimeoutError, not URLError.
                 if attempt < retries - 1:
                     time.sleep(delay)
                     delay *= 2
                     continue
-                raise LLMError(f"Network error calling {self.model}: {exc}") from exc
+                kind = "Timeout" if isinstance(exc, TimeoutError) or "timed out" in str(exc) else "Network error"
+                raise LLMError(f"{kind} calling {self.model}: {exc}") from exc
         raise LLMError("unreachable")

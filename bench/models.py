@@ -6,7 +6,7 @@ refusing calls to them. Each default model gets one of:
   OK                  a real call succeeded
   LISTED BUT REFUSED  the provider lists it but rejects calls (e.g. HTTP 404/403)
   RATE LIMITED        HTTP 429 on the check; retry later before trusting it
-  UNAVAILABLE         HTTP 5xx after retries (overloaded or down); usually transient
+  UNAVAILABLE         HTTP 5xx or timeouts after retries (overloaded or down); usually transient
   NOT LISTED          absent from the provider's /models list
   ERROR               anything else (network, missing key)
 
@@ -55,11 +55,15 @@ def check_model(model: str, listed: list[str] | None) -> str:
             return "RATE LIMITED"
         if exc.status is not None and exc.status >= 500:
             return f"UNAVAILABLE (HTTP {exc.status}, likely transient)"
+        if str(exc).startswith("Timeout"):
+            return "UNAVAILABLE (timeout, likely transient)"
         if listed is not None and model_id not in listed:
             return "NOT LISTED"
         if exc.status is not None:
             return f"LISTED BUT REFUSED (HTTP {exc.status})"
         return f"ERROR ({str(exc)[:80]})"
+    except Exception as exc:  # a check must never crash the whole listing
+        return f"ERROR ({type(exc).__name__}: {str(exc)[:80]})"
 
 
 def main() -> None:
@@ -86,7 +90,7 @@ def main() -> None:
     for m in targets:
         status = check_model(m, listings.get(m.partition("/")[0]))
         bad += status != "OK"
-        print(f"   {m:40s} {status}")
+        print(f"   {m:40s} {status}", flush=True)
     if bad:
         print(f"\n{bad} model(s) not usable. UNAVAILABLE/RATE LIMITED: retry later; otherwise update DEFAULT_MODELS in bench/config.py.")
         sys.exit(1)

@@ -194,6 +194,8 @@ class OfflineTests(unittest.TestCase):
                     pass
 
                 def ping(self):
+                    if status == "timeout":
+                        raise LLMError("Timeout calling m: read timed out")
                     if status:
                         raise LLMError("boom", status=status)
                     return "OK"
@@ -203,10 +205,19 @@ class OfflineTests(unittest.TestCase):
             (404, ["m"], "LISTED BUT REFUSED (HTTP 404)"),
             (429, ["m"], "RATE LIMITED"),
             (503, ["m"], "UNAVAILABLE (HTTP 503, likely transient)"),
+            ("timeout", ["m"], "UNAVAILABLE (timeout, likely transient)"),
             (404, ["other"], "NOT LISTED"),
         ]:
             with mock.patch.object(models, "ChatClient", fake_client(status)):
                 self.assertEqual(models.check_model("gemini/m", listed), expected)
+
+    def test_read_timeout_becomes_llm_error(self):
+        from bench import llm
+        with mock.patch.object(llm, "resolve", lambda m: ("https://x", "k", "m")), \
+             mock.patch("urllib.request.urlopen", side_effect=TimeoutError("The read operation timed out")):
+            with self.assertRaises(LLMError) as ctx:
+                llm.ChatClient("p/m").ping()
+        self.assertTrue(str(ctx.exception).startswith("Timeout"))
 
 
 if __name__ == "__main__":
