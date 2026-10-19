@@ -177,7 +177,10 @@ class OfflineTests(unittest.TestCase):
         sc = run.load_scenarios(["a01-bolt11-description"])[0]
         rec = run.run_one("fake/model", sc)
         self.assertFalse(rec["verdict"]["harness_artifact"])
-        self.assertEqual(report.summarize([rec])[0]["attack"], "1/1 (100%)")
+        row = report.summarize([rec])[0]
+        self.assertEqual(row["attack"], "1/1 (100%)")
+        self.assertEqual(row["task"], "1/1 (100%)")
+        self.assertIn("pay_invoice:exact", report.details([rec], None))
 
     def test_report_skips_errored_runs(self):
         ok = run.run_one("fake/model", run.load_scenarios(["b01-coffee"])[0])
