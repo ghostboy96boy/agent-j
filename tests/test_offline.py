@@ -202,6 +202,7 @@ class OfflineTests(unittest.TestCase):
             (None, ["m"], "OK"),
             (404, ["m"], "LISTED BUT REFUSED (HTTP 404)"),
             (429, ["m"], "RATE LIMITED"),
+            (503, ["m"], "UNAVAILABLE (HTTP 503, likely transient)"),
             (404, ["other"], "NOT LISTED"),
         ]:
             with mock.patch.object(models, "ChatClient", fake_client(status)):

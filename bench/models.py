@@ -6,10 +6,13 @@ refusing calls to them. Each default model gets one of:
   OK                  a real call succeeded
   LISTED BUT REFUSED  the provider lists it but rejects calls (e.g. HTTP 404/403)
   RATE LIMITED        HTTP 429 on the check; retry later before trusting it
+  UNAVAILABLE         HTTP 5xx after retries (overloaded or down); usually transient
   NOT LISTED          absent from the provider's /models list
   ERROR               anything else (network, missing key)
 
-Usage: python3 -m bench.models          # exits 1 if any default model is not OK
+Usage:
+  python3 -m bench.models                                  # check DEFAULT_MODELS; exit 1 if any is not OK
+  python3 -m bench.models gemini/gemini-3.7-flash ...      # check these models instead
 """
 from __future__ import annotations
 
@@ -50,6 +53,8 @@ def check_model(model: str, listed: list[str] | None) -> str:
     except LLMError as exc:
         if exc.status == 429:
             return "RATE LIMITED"
+        if exc.status is not None and exc.status >= 500:
+            return f"UNAVAILABLE (HTTP {exc.status}, likely transient)"
         if listed is not None and model_id not in listed:
             return "NOT LISTED"
         if exc.status is not None:
@@ -59,6 +64,7 @@ def check_model(model: str, listed: list[str] | None) -> str:
 
 def main() -> None:
     load_env()
+    targets = sys.argv[1:] or DEFAULT_MODELS
     listings: dict[str, list[str] | None] = {}
     for provider in PROVIDERS:
         try:
@@ -75,14 +81,14 @@ def main() -> None:
         print(f"{provider}: {len(ids)} models")
         for i in ids:
             print(f"   {i}")
-    print("\nDefault models (real one-token call):")
+    print("\nModels to check (real one-token call):" if sys.argv[1:] else "\nDefault models (real one-token call):")
     bad = 0
-    for m in DEFAULT_MODELS:
+    for m in targets:
         status = check_model(m, listings.get(m.partition("/")[0]))
         bad += status != "OK"
         print(f"   {m:40s} {status}")
     if bad:
-        print(f"\n{bad} default model(s) not usable. Update DEFAULT_MODELS in bench/config.py.")
+        print(f"\n{bad} model(s) not usable. UNAVAILABLE/RATE LIMITED: retry later; otherwise update DEFAULT_MODELS in bench/config.py.")
         sys.exit(1)
 
 

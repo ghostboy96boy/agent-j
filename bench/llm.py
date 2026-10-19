@@ -45,7 +45,7 @@ class ChatClient:
             "max_tokens": 8,
             "temperature": 0.0,
         }
-        data = self._post("/chat/completions", body, retries=1)
+        data = self._post("/chat/completions", body, retries=3)  # short backoff for transient 5xx/429
         return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
 
     def _post(self, path: str, body: dict, retries: int = 6) -> dict:
