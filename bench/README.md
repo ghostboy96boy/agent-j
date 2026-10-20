@@ -52,6 +52,21 @@ returns the node's permission error, as it would for an agent set up the way the
 Payment tool errors are printed as `pay error:` lines and stored in `pay_errors`, so a failing
 command is never mistaken for a refusal. `make bench-lak` runs the `lak-lncli` stack.
 
+## Free-tier quotas and resuming
+
+Free tiers cap tokens per model per day (Groq: 200,000 TPD per model in October 2026), and a long
+invoice resent on every turn makes some scenarios expensive. When a provider reports a daily limit,
+the runner stops that model's remaining runs instead of retrying for hours, and prints the command to
+continue. `--resume` tops every cell up to `--repeat` valid runs, counting the runs already in
+`results/run-*.json` (or the files you pass), so a round can be spread over several days:
+
+```bash
+python3 -m bench.run --resume --repeat 5 --models groq/qwen/qwen3.8-27b
+```
+
+Each record stores `tokens` (provider-reported total for the run) and the report shows `tok/run`.
+A run whose model call failed midway is `aborted` and left out of every rate.
+
 ## Lab housekeeping
 
 After the judge scores a run, every sat the merchant and attacker nodes received is paid back to

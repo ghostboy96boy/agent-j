@@ -20,7 +20,7 @@ from pathlib import Path
 from . import judge, lnnodes
 from .agent import LAK_PROFILE, STACKS, make_tool_runner, run_agent
 from .config import DEFAULT_MODELS, ROOT, load_env
-from .llm import ChatClient, LLMError
+from .llm import ChatClient, DailyQuotaError, LLMError
 
 SCENARIO_DIR = ROOT / "scenarios"
 RESULTS_DIR = ROOT / "results"
@@ -133,16 +133,23 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
         "defense_layer": STACKS[stack][0],
         "invoices": {name: {**issued[name], "bolt11": bolt11[name]} for name in issued},
     }
+    client = None
     try:
         runner = make_tool_runner(list(bolt11.values()), documents, stack)
-        transcript = run_agent(ChatClient(model), task, tool_runner=runner)
+        client = ChatClient(model)
+        transcript = run_agent(client, task, tool_runner=runner)
         record.update(
             tool_calls=transcript.tool_calls,
             final_text=transcript.final_text,
             agent_error=transcript.error,
         )
     except LLMError as exc:
-        record.update(tool_calls=[], final_text="", agent_error=str(exc))
+        # The model call failed. The run is invalid even if the agent already acted
+        # (it never got to finish), so it is marked aborted and left out of every rate.
+        partial = getattr(exc, "transcript", None)
+        record.update(tool_calls=partial.tool_calls if partial else [], final_text="",
+                      agent_error=str(exc), aborted=True, quota_exhausted=isinstance(exc, DailyQuotaError))
+    record["tokens"] = getattr(client, "tokens", 0)
     time.sleep(2)  # let the last HTLCs settle before reading the network
     record["verdict"] = judge.score(scenario, issued, lnnodes.invoice_paid_sat, pay_paths(record["tool_calls"], bolt11))
     calls = [c for c in record["tool_calls"] if c.get("copy_status")]
@@ -162,6 +169,22 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
     return record
 
 
+def is_invalid(record: dict) -> bool:
+    """Run that cannot be scored: the model call failed or the run was cut short."""
+    return bool(record.get("aborted")) or (bool(record.get("agent_error")) and not record.get("tool_calls"))
+
+
+def done_counts(paths: list[Path]) -> dict[tuple, int]:
+    """(model, stack, scenario) -> number of valid runs already in these result files."""
+    counts: dict[tuple, int] = {}
+    for p in paths:
+        for r in json.loads(p.read_text())["records"]:
+            if not is_invalid(r):
+                key = (r["model"], r.get("stack", "generic"), r["scenario"])
+                counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Agent J benchmark runner (regtest only)")
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
@@ -170,6 +193,9 @@ def main() -> None:
     ap.add_argument("--stack", default="generic", choices=sorted(STACKS),
                     help="payment stack the agent uses (see bench/README.md)")
     ap.add_argument("--no-refund", action="store_true", help="do not return received sats to alice after each run")
+    ap.add_argument("--resume", nargs="*", metavar="RESULTS",
+                    help="top up to --repeat valid runs per cell, counting runs in these files "
+                         "(no files given: every results/run-*.json)")
     ap.add_argument("--strict", action="store_true", help="exit 1 if any benign task is not completed (smoke test)")
     args = ap.parse_args()
 
@@ -181,7 +207,14 @@ def main() -> None:
     records = []
     RESULTS_DIR.mkdir(exist_ok=True)
     out = RESULTS_DIR / f"run-{stamp}.json"
-    total = len(args.models) * len(scenarios) * args.repeat
+    already: dict[tuple, int] = {}
+    if args.resume is not None:
+        paths = [Path(x) for x in args.resume] or sorted(RESULTS_DIR.glob("run-*.json"))
+        already = done_counts(paths)
+        print(f"resume: counting valid runs in {len(paths)} file(s)", flush=True)
+    todo = {(m, sc["id"]): max(0, args.repeat - already.get((m, args.stack, sc["id"]), 0))
+            for m in args.models for sc in scenarios}
+    total = sum(todo.values())
     print(f"{total} runs -> {out.relative_to(ROOT)} (saved after every run)", flush=True)
 
     def save() -> None:
@@ -189,14 +222,25 @@ def main() -> None:
         tmp.write_text(json.dumps({"created": stamp, "stack": args.stack, "defense_layer": STACKS[args.stack][0],
                                    "complete": len(records) == total, "records": records}, indent=2))
         tmp.replace(out)
+    out_of_quota: list[str] = []
     for model in args.models:
+        quota_hit = False
         for sc in scenarios:
-            for i in range(args.repeat):
+            if quota_hit:
+                break
+            start = already.get((model, args.stack, sc["id"]), 0)
+            for i in range(start, start + todo[(model, sc["id"])]):
                 rec = run_one(model, sc, do_refund=not args.no_refund, stack=args.stack)
                 records.append(rec)
                 save()
                 v = rec["verdict"]
-                if rec["agent_error"] and not rec["tool_calls"]:
+                if rec.get("quota_exhausted"):
+                    quota_hit = True
+                    out_of_quota.append(model)
+                    print(f"[{len(records)}/{total}] {model}: daily quota reached; skipping its remaining runs. "
+                          f"Continue later with --resume.", flush=True)
+                    break
+                if is_invalid(rec):
                     outcome = "ERROR"
                 elif rec["copy_failed"]:
                     outcome = "COPY FAILED"
@@ -211,7 +255,7 @@ def main() -> None:
                     fix += f"  ({rec['copy_ambiguous']} ambiguous copy)"
                 tag = model if args.stack == "generic" else f"{model} [{args.stack}]"
                 print(f"[{len(records)}/{total}] {tag:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} "
-                      f"lost={v['sats_lost']} sat  {rec['seconds']}s{fix}", flush=True)
+                      f"lost={v['sats_lost']} sat  {rec['seconds']}s  {rec['tokens']} tok{fix}", flush=True)
                 if rec["agent_error"]:
                     print(f"    error: {rec['agent_error'][:400]}", flush=True)
                 if rec["task_copy_blocked"]:
@@ -222,7 +266,13 @@ def main() -> None:
                     print(f"    refund warning: {prob}", flush=True)
 
     print(f"\nSaved {out.relative_to(ROOT)}  (summary: python3 -m bench.report {out.relative_to(ROOT)})")
-    errors = sum(1 for r in records if r["agent_error"] and not r["tool_calls"])
+    toks = [r["tokens"] for r in records if not is_invalid(r) and r.get("tokens")]
+    if toks:
+        print(f"tokens per valid run: mean {sum(toks) // len(toks)}, max {max(toks)}")
+    if out_of_quota:
+        print(f"daily quota reached for: {', '.join(out_of_quota)}. "
+              f"Next day: python3 -m bench.run --resume --repeat {args.repeat} --models {' '.join(args.models)}")
+    errors = sum(1 for r in records if is_invalid(r) and not r.get("quota_exhausted"))
     if errors:
         print(f"{errors} run(s) failed before the agent acted; see errors above.")
         sys.exit(1)

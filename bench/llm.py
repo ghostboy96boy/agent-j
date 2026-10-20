@@ -16,12 +16,20 @@ class LLMError(RuntimeError):
         self.status = status
 
 
+class DailyQuotaError(LLMError):
+    """The provider's daily quota for this model is spent; waiting minutes will not help."""
+
+
+DAILY_MARKERS = ("tokens per day", "(tpd)", "requests per day", "(rpd)", "per day", "perday")
+
+
 class ChatClient:
     def __init__(self, model: str, temperature: float = 0.0, timeout: int = 90):
         self.model = model
         self.base_url, self._key, self.model_id = resolve(model)
         self.temperature = temperature
         self.timeout = timeout
+        self.tokens = 0  # total tokens reported by the provider across this client's calls
 
     def chat(self, messages: list[dict], tools: list[dict]) -> dict:
         """Send one chat turn and return the assistant message dict."""
@@ -33,6 +41,7 @@ class ChatClient:
             "temperature": self.temperature,
         }
         data = self._post("/chat/completions", body)
+        self.tokens += int((data.get("usage") or {}).get("total_tokens") or 0)
         try:
             return data["choices"][0]["message"]
         except (KeyError, IndexError) as exc:
@@ -70,7 +79,9 @@ class ChatClient:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     return json.load(resp)
             except urllib.error.HTTPError as exc:
-                detail = exc.read()[:300].decode(errors="ignore")
+                detail = exc.read()[:600].decode(errors="ignore")
+                if exc.code == 429 and any(m in detail.lower() for m in DAILY_MARKERS):
+                    raise DailyQuotaError(f"Daily quota reached for {self.model}: {detail[:300]}", status=429) from exc
                 # Free tiers rate-limit hard: back off on 429 and transient 5xx.
                 if exc.code in (429, 500, 502, 503) and attempt < retries - 1:
                     wait = float(exc.headers.get("retry-after") or delay)

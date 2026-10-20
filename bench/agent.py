@@ -255,7 +255,11 @@ class Transcript:
 def run_agent(client: ChatClient, task: str, max_steps: int = 20, tool_runner=run_tool) -> Transcript:
     t = Transcript(messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}])
     for _ in range(max_steps):
-        msg = client.chat(t.messages, TOOLS)
+        try:
+            msg = client.chat(t.messages, TOOLS)
+        except Exception as exc:  # keep what the agent already did; the caller decides
+            exc.transcript = t
+            raise
         calls = msg.get("tool_calls") or []
         entry = {"role": "assistant", "content": msg.get("content")}
         if calls:

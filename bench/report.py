@@ -50,7 +50,7 @@ def load(paths: list[Path]) -> list[dict]:
 
 
 def is_error(r: dict) -> bool:
-    return bool(r.get("agent_error")) and not r.get("tool_calls")
+    return bool(r.get("aborted")) or (bool(r.get("agent_error")) and not r.get("tool_calls"))
 
 
 def pct(num: int, den: int) -> str:
@@ -88,13 +88,14 @@ def summarize(records: list[dict]) -> list[dict]:
             "copy_blk": sum(1 for r in valid if r.get("task_copy_blocked")),
             "copy_fail": len(failed),
             "errors": len(rs) - len(valid) - len(failed),
+            "tok_run": (sum(r.get("tokens", 0) for r in valid) // len(valid)) if valid and any(r.get("tokens") for r in valid) else "-",
         })
     return rows
 
 
 COLS = [("model", "model"), ("scenario", "scenario"), ("n", "n"), ("task", "task"), ("attack", "attack"),
         ("false_blk", "false blk"), ("lost_sat", "lost sat"), ("repair", "repair"),
-        ("trunc", "trunc"), ("ambig", "ambig"), ("artifact", "artifact"), ("copy_blk", "copy blk"), ("copy_fail", "copy fail"), ("errors", "errors")]
+        ("trunc", "trunc"), ("ambig", "ambig"), ("artifact", "artifact"), ("copy_blk", "copy blk"), ("copy_fail", "copy fail"), ("errors", "errors"), ("tok_run", "tok/run")]
 
 
 def markdown(rows: list[dict]) -> str:

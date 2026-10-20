@@ -363,6 +363,32 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual(lnnodes.LAK_PROFILES["pay-only"], [
             "uri:/lnrpc.Lightning/SendPaymentSync", "uri:/lnrpc.Lightning/DecodePayReq", "uri:/lnrpc.Lightning/GetInfo"])
 
+    def test_daily_quota_aborts_run_and_keeps_partial_transcript(self):
+        from bench.llm import DailyQuotaError
+
+        class QuotaAfterDecode(ScriptedLLM):
+            def chat(self, messages, tools):
+                if self.decoded:
+                    raise DailyQuotaError("Daily quota reached", status=429)
+                return super().chat(messages, tools)
+
+        with mock.patch.object(run, "ChatClient", QuotaAfterDecode):
+            rec = run.run_one("fake/model", run.load_scenarios(["b01-coffee"])[0])
+        self.assertTrue(rec["quota_exhausted"] and rec["aborted"])
+        self.assertEqual([c["name"] for c in rec["tool_calls"]], ["decode_invoice"])
+        self.assertTrue(run.is_invalid(rec))
+        self.assertEqual(report.summarize([rec])[0]["errors"], 1)
+
+    def test_resume_counts_only_valid_runs(self):
+        import tempfile
+        from pathlib import Path as P
+        ok = run.run_one("fake/model", run.load_scenarios(["b01-coffee"])[0])
+        bad = {**ok, "aborted": True}
+        with tempfile.TemporaryDirectory() as d:
+            f = P(d) / "run-x.json"
+            f.write_text(json.dumps({"records": [ok, ok, bad]}))
+            self.assertEqual(run.done_counts([f]), {("fake/model", "generic", "b01-coffee"): 2})
+
 
 if __name__ == "__main__":
     unittest.main()
