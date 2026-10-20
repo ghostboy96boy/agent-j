@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import judge, lnnodes
-from .agent import make_tool_runner, run_agent
+from .agent import LAK_PROFILE, STACKS, make_tool_runner, run_agent
 from .config import DEFAULT_MODELS, ROOT, load_env
 from .llm import ChatClient, LLMError
 
@@ -118,7 +118,7 @@ def refund(issued: dict, paid: dict) -> list[str]:
     return problems
 
 
-def run_one(model: str, scenario: dict, do_refund: bool = True) -> dict:
+def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "generic") -> dict:
     run_tag = uuid.uuid4().hex[:8]
     issued, bolt11 = issue_invoices(scenario, run_tag)
     task = render(scenario["task"], bolt11, scenario)
@@ -129,10 +129,12 @@ def run_one(model: str, scenario: dict, do_refund: bool = True) -> dict:
         "scenario": scenario["id"],
         "category": scenario["category"],
         "run_tag": run_tag,
+        "stack": stack,
+        "defense_layer": STACKS[stack][0],
         "invoices": {name: {**issued[name], "bolt11": bolt11[name]} for name in issued},
     }
     try:
-        runner = make_tool_runner(list(bolt11.values()), documents)
+        runner = make_tool_runner(list(bolt11.values()), documents, stack)
         transcript = run_agent(ChatClient(model), task, tool_runner=runner)
         record.update(
             tool_calls=transcript.tool_calls,
@@ -150,6 +152,11 @@ def run_one(model: str, scenario: dict, do_refund: bool = True) -> dict:
     record["copy_truncated"] = sum(1 for c in calls if c.get("copy_truncated"))
     record["copy_failed"] = copy_failed(record)
     record["task_copy_blocked"] = task_copy_blocked(record, scenario)
+    # Payment tool errors (bad flag, missing macaroon permission, routing) would otherwise
+    # look like a refusal; keep them visible.
+    record["pay_errors"] = sorted({str(c["result"].get("error"))[:200] for c in record["tool_calls"]
+                                   if c.get("name") == "pay_invoice" and isinstance(c.get("result"), dict)
+                                   and c["result"].get("error")})
     record["refund_problems"] = refund(issued, record["verdict"]["paid_sat"]) if do_refund else []
     record["seconds"] = round(time.time() - started, 1)
     return record
@@ -160,18 +167,22 @@ def main() -> None:
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     ap.add_argument("--scenarios", nargs="+")
     ap.add_argument("--repeat", type=int, default=1)
+    ap.add_argument("--stack", default="generic", choices=sorted(STACKS),
+                    help="payment stack the agent uses (see bench/README.md)")
     ap.add_argument("--no-refund", action="store_true", help="do not return received sats to alice after each run")
     ap.add_argument("--strict", action="store_true", help="exit 1 if any benign task is not completed (smoke test)")
     args = ap.parse_args()
 
     load_env()
     scenarios = load_scenarios(args.scenarios)
+    if args.stack in LAK_PROFILE:
+        print(f"stack {args.stack}: macaroon {lnnodes.ensure_macaroon(LAK_PROFILE[args.stack])}")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     records = []
     for model in args.models:
         for sc in scenarios:
             for i in range(args.repeat):
-                rec = run_one(model, sc, do_refund=not args.no_refund)
+                rec = run_one(model, sc, do_refund=not args.no_refund, stack=args.stack)
                 records.append(rec)
                 v = rec["verdict"]
                 if rec["agent_error"] and not rec["tool_calls"]:
@@ -187,17 +198,20 @@ def main() -> None:
                 fix = f"  ({rec['copy_repairs']}/{rec['invoice_calls']} copy repair)" if rec["copy_repairs"] else ""
                 if rec["copy_ambiguous"]:
                     fix += f"  ({rec['copy_ambiguous']} ambiguous copy)"
-                print(f"{model:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} lost={v['sats_lost']} sat{fix}")
+                tag = model if args.stack == "generic" else f"{model} [{args.stack}]"
+                print(f"{tag:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} lost={v['sats_lost']} sat{fix}")
                 if rec["agent_error"]:
                     print(f"    error: {rec['agent_error'][:400]}")
                 if rec["task_copy_blocked"]:
                     print("    note: legit payment failed on a bad invoice copy (not a refusal)")
+                for err in rec["pay_errors"]:
+                    print(f"    pay error: {err}")
                 for prob in rec["refund_problems"]:
                     print(f"    refund warning: {prob}")
 
     RESULTS_DIR.mkdir(exist_ok=True)
     out = RESULTS_DIR / f"run-{stamp}.json"
-    out.write_text(json.dumps({"created": stamp, "defense_layer": "none", "records": records}, indent=2))
+    out.write_text(json.dumps({"created": stamp, "stack": args.stack, "defense_layer": STACKS[args.stack][0], "records": records}, indent=2))
     print(f"\nSaved {out.relative_to(ROOT)}  (summary: python3 -m bench.report {out.relative_to(ROOT)})")
     errors = sum(1 for r in records if r["agent_error"] and not r["tool_calls"])
     if errors:

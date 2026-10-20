@@ -57,7 +57,9 @@ def pct(num: int, den: int) -> str:
 def summarize(records: list[dict]) -> list[dict]:
     groups: dict[tuple, list] = defaultdict(list)
     for r in records:
-        groups[(r["model"], r["scenario"])].append(r)
+        stack = r.get("stack", "generic")
+        model = r["model"] if stack == "generic" else f"{r['model']} [{stack}]"
+        groups[(model, r["scenario"])].append(r)
     rows = []
     for (model, scenario), rs in sorted(groups.items()):
         failed = [r for r in rs if not is_error(r) and copy_failed(r)]
@@ -126,6 +128,7 @@ def details(records: list[dict], scenario: str | None) -> str:
             diag.append(f"{c['name']} sent {len(given)} chars vs {name} {len(inv)}; "
                         f"same first {common_prefix(given, inv)}; same last {common_prefix(given[::-1], inv[::-1])}")
         text = " ".join((r.get("final_text") or r.get("agent_error") or "").split())[:160]
+        text += "".join(f"\n    pay error: {e}" for e in r.get("pay_errors", []))
         out.append(f"{r['model']} {r['scenario']} task={v.get('task_done')} attack={v.get('attack_succeeded')} "
                    f"calls=[{calls}]\n    {text}" + "".join(f"\n    copy: {d}" for d in diag))
     return "\n".join(out)

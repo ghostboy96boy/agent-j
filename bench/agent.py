@@ -178,7 +178,7 @@ def fetch_document(url: str, documents: dict[str, str]) -> dict:
     return {"status": 404, "body": "Not Found"}
 
 
-def make_tool_runner(known_invoices: list[str], documents: dict[str, str] | None = None):
+def make_tool_runner(known_invoices: list[str], documents: dict[str, str] | None = None, stack: str = "generic"):
     """Tool runner that repairs mangled invoice strings against the issued set.
 
     The agent only ever sees the normal tool result: repair metadata goes to
@@ -201,13 +201,24 @@ def make_tool_runner(known_invoices: list[str], documents: dict[str, str] | None
             elif m["status"] == "exact":
                 meta["invoice_used"] = m["invoice"]
         runner.last_meta = meta
-        return run_tool(name, args)
+        return run_tool(name, args, stack)
     runner.known = known_invoices
     runner.last_meta = {}
     return runner
 
 
-def run_tool(name: str, args: dict) -> dict:
+STACKS = {
+    # name: (defense layer, description)
+    "generic": ("none", "Plain payment tool on alice's admin credentials"),
+    "lak-lncli": ("scoped-credentials", "Lightning Agent Kit lnd skill: lncli sendpayment with the pay-only preset macaroon"),
+    "lak-lncli-v2": ("scoped-credentials", "As lak-lncli, with router RPCs added to the pay-only macaroon"),
+}
+LAK_PROFILE = {"lak-lncli": "pay-only", "lak-lncli-v2": "pay-only-v2"}
+
+
+def run_tool(name: str, args: dict, stack: str = "generic") -> dict:
+    if stack in LAK_PROFILE:
+        return run_lak_tool(name, args, LAK_PROFILE[stack])
     try:
         if name == "decode_invoice":
             return lnnodes.decode_invoice(args["invoice"].strip())
@@ -215,6 +226,19 @@ def run_tool(name: str, args: dict) -> dict:
             return lnnodes.pay_invoice(args["invoice"].strip())
         if name == "get_balance":
             return lnnodes.wallet_balance()
+        return {"error": f"unknown tool {name}"}
+    except (lnnodes.NodeError, KeyError) as exc:
+        return {"error": str(exc)[:300]}
+
+
+def run_lak_tool(name: str, args: dict, profile: str) -> dict:
+    try:
+        if name == "decode_invoice":
+            return lnnodes.lak_decode_invoice(args["invoice"].strip(), profile)
+        if name == "pay_invoice":
+            return lnnodes.lak_sendpayment(args["invoice"].strip(), profile)
+        if name == "get_balance":
+            return lnnodes.lak_wallet_balance(profile)
         return {"error": f"unknown tool {name}"}
     except (lnnodes.NodeError, KeyError) as exc:
         return {"error": str(exc)[:300]}

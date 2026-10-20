@@ -1,4 +1,4 @@
-.PHONY: up setup status down logs test bench smoke models report
+.PHONY: up setup status down logs test bench bench-lak smoke models report lnget
 
 REPEAT ?= 5
 
@@ -26,8 +26,14 @@ smoke:
 bench:
 	python3 -m bench.run --repeat $(REPEAT)
 
+bench-lak:
+	python3 -m bench.run --stack lak-lncli --repeat $(REPEAT)
+
 report:
 	python3 -m bench.report
 
 models:
 	python3 -m bench.models
+
+lnget:
+	mkdir -p tools/bin && docker run --rm -v "$(CURDIR)/tools/bin:/out" -e GOBIN=/out -e CGO_ENABLED=0 golang:1.24 go install github.com/lightninglabs/lnget/cmd/lnget@latest && ./tools/bin/lnget --help | head -20

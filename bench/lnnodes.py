@@ -18,9 +18,10 @@ class NodeError(RuntimeError):
     pass
 
 
-def _exec(node: str, args: list[str], timeout: int = 90) -> str:
+def _exec(node: str, args: list[str], timeout: int = 90, macaroon: str | None = None) -> str:
     if node in LND_NODES:
-        cmd = ["docker", "compose", "exec", "-T", node, "lncli", "--network=regtest", *args]
+        mac = [f"--macaroonpath={macaroon}"] if macaroon else []
+        cmd = ["docker", "compose", "exec", "-T", node, "lncli", "--network=regtest", *mac, *args]
     elif node in CLN_NODES:
         cmd = ["docker", "compose", "exec", "-T", node, "lightning-cli", "--network=regtest", *args]
     else:
@@ -31,8 +32,8 @@ def _exec(node: str, args: list[str], timeout: int = 90) -> str:
     return proc.stdout
 
 
-def _json(node: str, args: list[str], timeout: int = 90) -> dict:
-    out = _exec(node, args, timeout)
+def _json(node: str, args: list[str], timeout: int = 90, macaroon: str | None = None) -> dict:
+    out = _exec(node, args, timeout, macaroon)
     try:
         return json.loads(out)
     except json.JSONDecodeError as exc:
@@ -127,3 +128,83 @@ def return_to_wallet(node: str, amount_sat: int) -> None:
         _exec(node, ["payinvoice", "--force", "--json", "--timeout", "60s", "--pay_req", inv["payment_request"]], timeout=120)
     else:
         raise NodeError(f"Unknown node {node}")
+
+
+# ---- Lightning Agent Kit stack ("lak-lncli") ----
+#
+# Mirrors lightninglabs/lightning-agent-tools: the lnd skill pays with
+# `lncli sendpayment --pay_req=<bolt11>`, and the macaroon-bakery "pay-only"
+# preset grants SendPaymentSync, DecodePayReq and GetInfo. The agent's calls run
+# with that scoped macaroon instead of admin (defense layer 4: scoped credentials).
+
+MACAROON_DIR = "/root/.lnd/agentj"
+LAK_PROFILES = {
+    # Exact permissions of the kit's pay-only preset (docs/security.md).
+    "pay-only": [
+        "uri:/lnrpc.Lightning/SendPaymentSync",
+        "uri:/lnrpc.Lightning/DecodePayReq",
+        "uri:/lnrpc.Lightning/GetInfo",
+    ],
+    # Variant that also allows the router RPCs current lncli versions use for
+    # sendpayment; used to tell a permission gap apart from a security block.
+    "pay-only-v2": [
+        "uri:/lnrpc.Lightning/SendPaymentSync",
+        "uri:/routerrpc.Router/SendPaymentV2",
+        "uri:/routerrpc.Router/TrackPaymentV2",
+        "uri:/lnrpc.Lightning/DecodePayReq",
+        "uri:/lnrpc.Lightning/GetInfo",
+    ],
+}
+
+
+def macaroon_path(profile: str) -> str:
+    return f"{MACAROON_DIR}/{profile}.macaroon"
+
+
+def ensure_macaroon(profile: str) -> str:
+    """Bake the profile's macaroon on alice once (with admin) and return its path."""
+    path = macaroon_path(profile)
+    check = subprocess.run(["docker", "compose", "exec", "-T", WALLET, "test", "-f", path],
+                           cwd=ROOT, capture_output=True, text=True)
+    if check.returncode != 0:
+        subprocess.run(["docker", "compose", "exec", "-T", WALLET, "mkdir", "-p", MACAROON_DIR],
+                       cwd=ROOT, capture_output=True, text=True, check=False)
+        _exec(WALLET, ["bakemacaroon", "--save_to", path, *LAK_PROFILES[profile]])
+    return path
+
+
+def lak_decode_invoice(bolt11: str, profile: str) -> dict:
+    d = _json(WALLET, ["decodepayreq", bolt11], macaroon=macaroon_path(profile))
+    return {
+        "amount_sat": int(d.get("num_satoshis", 0)),
+        "description": d.get("description", ""),
+        "destination": d.get("destination", ""),
+        "expiry_seconds": int(d.get("expiry", 0)),
+    }
+
+
+def lak_sendpayment(bolt11: str, profile: str) -> dict:
+    """The kit's payment command: lncli sendpayment --pay_req=<bolt11>, with the scoped macaroon."""
+    out = _exec(WALLET, ["sendpayment", "--force", "--json", f"--pay_req={bolt11}"],
+                timeout=120, macaroon=macaroon_path(profile))
+    last = None
+    for chunk in out.replace("}\n{", "}\x00{").split("\x00"):
+        try:
+            last = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+    if not last:
+        return {"status": "UNKNOWN", "raw": out[-300:]}
+    return {
+        "status": last.get("status", "UNKNOWN"),
+        "amount_sat": int(last.get("value_sat", 0) or 0),
+        "fee_sat": int(last.get("fee_sat", 0) or 0),
+        "failure_reason": last.get("failure_reason", ""),
+    }
+
+
+def lak_wallet_balance(profile: str) -> dict:
+    """ChannelBalance is not in the pay-only preset, so this is expected to be refused."""
+    d = _json(WALLET, ["channelbalance"], macaroon=macaroon_path(profile))
+    local = d.get("local_balance", {}).get("sat", d.get("balance", 0))
+    return {"spendable_sat": int(local)}

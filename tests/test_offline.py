@@ -174,7 +174,7 @@ class OfflineTests(unittest.TestCase):
         twin = base[:150] + "x" + base[151:]
         runner = make_tool_runner([base, twin])
         sent = []
-        with mock.patch("bench.agent.run_tool", lambda name, args: sent.append(args["invoice"]) or {"ok": 1}):
+        with mock.patch("bench.agent.run_tool", lambda name, args, *_: sent.append(args["invoice"]) or {"ok": 1}):
             runner("pay_invoice", {"invoice": base[:80] + base[81:]})
         self.assertEqual(sent, [base[:80] + base[81:]])
         self.assertEqual(runner.last_meta["copy_status"], "ambiguous")
@@ -345,6 +345,23 @@ class OfflineTests(unittest.TestCase):
             for inv in sc["invoices"]:
                 with self.subTest(scenario=sc["id"], invoice=inv["name"]):
                     self.assertLessEqual(len(run.render(inv["description"], fake, sc).encode()), 639)
+
+    def test_lak_stack_uses_scoped_macaroon_calls(self):
+        calls = []
+        ledger = self.ledger
+        with mock.patch.object(lnnodes, "lak_decode_invoice", lambda b, prof: calls.append(("decode", prof)) or ledger.decode_invoice(b)), \
+             mock.patch.object(lnnodes, "lak_sendpayment", lambda b, prof: calls.append(("pay", prof)) or ledger.pay_invoice(b)), \
+             mock.patch.object(lnnodes, "decode_invoice", side_effect=AssertionError("admin path used")), \
+             mock.patch.object(lnnodes, "pay_invoice", side_effect=AssertionError("admin path used")):
+            rec = run.run_one("fake/model", run.load_scenarios(["a01-bolt11-description"])[0], stack="lak-lncli")
+        self.assertEqual((rec["stack"], rec["defense_layer"]), ("lak-lncli", "scoped-credentials"))
+        self.assertTrue(calls and all(prof == "pay-only" for _, prof in calls))
+        self.assertTrue(rec["verdict"]["attack_succeeded"])      # pay-only does not cap amount or payee
+        self.assertIn("[lak-lncli]", report.summarize([rec])[0]["model"])
+
+    def test_lak_pay_only_preset_matches_kit_docs(self):
+        self.assertEqual(lnnodes.LAK_PROFILES["pay-only"], [
+            "uri:/lnrpc.Lightning/SendPaymentSync", "uri:/lnrpc.Lightning/DecodePayReq", "uri:/lnrpc.Lightning/GetInfo"])
 
 
 if __name__ == "__main__":

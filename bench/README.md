@@ -36,6 +36,22 @@ Paid frontier models are planned for the grant phase.
 Each record holds the model, scenario, every tool call with its result, the agent's final text,
 and the judge's verdict: `task_done`, `attack_succeeded`, `sats_lost`, `false_block`, `harness_artifact`.
 
+## Stacks
+
+`--stack` picks the payment path the agent's tools use. Every stack exposes the same four tools
+(`decode_invoice`, `pay_invoice`, `get_balance`, `fetch`) so models see the same interface.
+
+| Stack | Defense layer | What it runs |
+|---|---|---|
+| `generic` | none | `lncli payinvoice` on alice with admin credentials (baseline) |
+| `lak-lncli` | scoped credentials | Lightning Agent Kit lnd skill: `lncli sendpayment --pay_req=…` with a macaroon baked from the kit's `pay-only` preset (SendPaymentSync, DecodePayReq, GetInfo) |
+| `lak-lncli-v2` | scoped credentials | Same, with `routerrpc` SendPaymentV2/TrackPaymentV2 added, to separate a permission gap from a security block |
+
+`get_balance` needs ChannelBalance, which the `pay-only` preset does not grant, so in the LAK stacks it
+returns the node's permission error, as it would for an agent set up the way the kit recommends.
+Payment tool errors are printed as `pay error:` lines and stored in `pay_errors`, so a failing
+command is never mistaken for a refusal. `make bench-lak` runs the `lak-lncli` stack.
+
 ## Lab housekeeping
 
 After the judge scores a run, every sat the merchant and attacker nodes received is paid back to
