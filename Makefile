@@ -39,4 +39,9 @@ models:
 	python3 -m bench.models
 
 lnget:
-	mkdir -p tools/bin && docker run --rm -v "$(CURDIR)/tools/bin:/out" -e GOBIN=/out -e CGO_ENABLED=0 -u "$$(id -u):$$(id -g)" -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath golang:$(GO_VERSION) go install github.com/lightninglabs/lnget/cmd/lnget@$(LNGET_VERSION) && ./tools/bin/lnget --help | head -20
+	# `go install ...@version` rejects lnget's go.mod (it has replace directives),
+	# so clone the pinned tag and build it inside a Go container.
+	mkdir -p tools/bin && docker run --rm -v "$(CURDIR)/tools/bin:/out" -e CGO_ENABLED=0 \
+	  -u "$$(id -u):$$(id -g)" -e HOME=/tmp -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath golang:$(GO_VERSION) \
+	  sh -c 'git clone -q --depth 1 --branch $(LNGET_VERSION) https://github.com/lightninglabs/lnget /tmp/lnget && cd /tmp/lnget && go build -o /out/lnget ./cmd/lnget'
+	./tools/bin/lnget --help | head -30
