@@ -17,7 +17,7 @@ class LLMError(RuntimeError):
 
 
 class ChatClient:
-    def __init__(self, model: str, temperature: float = 0.0, timeout: int = 120):
+    def __init__(self, model: str, temperature: float = 0.0, timeout: int = 90):
         self.model = model
         self.base_url, self._key, self.model_id = resolve(model)
         self.temperature = temperature
@@ -79,8 +79,10 @@ class ChatClient:
                     continue
                 raise LLMError(f"HTTP {exc.code} from {self.model}: {detail}", status=exc.code) from exc
             except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as exc:
-                # A read timeout surfaces as a bare TimeoutError, not URLError.
-                if attempt < retries - 1:
+                # A read timeout surfaces as a bare TimeoutError, not URLError. Timeouts get at
+                # most 2 retries: an overloaded provider otherwise stalls a run for ~15 minutes.
+                timed_out = isinstance(exc, TimeoutError) or "timed out" in str(exc)
+                if attempt < (min(retries, 3) if timed_out else retries) - 1:
                     time.sleep(delay)
                     delay *= 2
                     continue

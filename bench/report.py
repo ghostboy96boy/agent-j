@@ -42,7 +42,10 @@ from .run import copy_failed
 def load(paths: list[Path]) -> list[dict]:
     records = []
     for p in paths:
-        records += json.loads(p.read_text())["records"]
+        data = json.loads(p.read_text())
+        if data.get("complete") is False:
+            print(f"note: {p} is a partial run ({len(data['records'])} records so far)")
+        records += data["records"]
     return records
 
 

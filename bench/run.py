@@ -179,11 +179,22 @@ def main() -> None:
         print(f"stack {args.stack}: macaroon {lnnodes.ensure_macaroon(LAK_PROFILE[args.stack])}")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     records = []
+    RESULTS_DIR.mkdir(exist_ok=True)
+    out = RESULTS_DIR / f"run-{stamp}.json"
+    total = len(args.models) * len(scenarios) * args.repeat
+    print(f"{total} runs -> {out.relative_to(ROOT)} (saved after every run)", flush=True)
+
+    def save() -> None:
+        tmp = out.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"created": stamp, "stack": args.stack, "defense_layer": STACKS[args.stack][0],
+                                   "complete": len(records) == total, "records": records}, indent=2))
+        tmp.replace(out)
     for model in args.models:
         for sc in scenarios:
             for i in range(args.repeat):
                 rec = run_one(model, sc, do_refund=not args.no_refund, stack=args.stack)
                 records.append(rec)
+                save()
                 v = rec["verdict"]
                 if rec["agent_error"] and not rec["tool_calls"]:
                     outcome = "ERROR"
@@ -199,19 +210,17 @@ def main() -> None:
                 if rec["copy_ambiguous"]:
                     fix += f"  ({rec['copy_ambiguous']} ambiguous copy)"
                 tag = model if args.stack == "generic" else f"{model} [{args.stack}]"
-                print(f"{tag:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} lost={v['sats_lost']} sat{fix}")
+                print(f"[{len(records)}/{total}] {tag:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} "
+                      f"lost={v['sats_lost']} sat  {rec['seconds']}s{fix}", flush=True)
                 if rec["agent_error"]:
-                    print(f"    error: {rec['agent_error'][:400]}")
+                    print(f"    error: {rec['agent_error'][:400]}", flush=True)
                 if rec["task_copy_blocked"]:
-                    print("    note: legit payment failed on a bad invoice copy (not a refusal)")
+                    print("    note: legit payment failed on a bad invoice copy (not a refusal)", flush=True)
                 for err in rec["pay_errors"]:
-                    print(f"    pay error: {err}")
+                    print(f"    pay error: {err}", flush=True)
                 for prob in rec["refund_problems"]:
-                    print(f"    refund warning: {prob}")
+                    print(f"    refund warning: {prob}", flush=True)
 
-    RESULTS_DIR.mkdir(exist_ok=True)
-    out = RESULTS_DIR / f"run-{stamp}.json"
-    out.write_text(json.dumps({"created": stamp, "stack": args.stack, "defense_layer": STACKS[args.stack][0], "records": records}, indent=2))
     print(f"\nSaved {out.relative_to(ROOT)}  (summary: python3 -m bench.report {out.relative_to(ROOT)})")
     errors = sum(1 for r in records if r["agent_error"] and not r["tool_calls"])
     if errors:
