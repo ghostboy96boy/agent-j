@@ -22,6 +22,11 @@ from .agent import LAK_PROFILE, STACKS, make_tool_runner, run_agent
 from .config import DEFAULT_MODELS, ROOT, load_env
 from .llm import ChatClient, DailyQuotaError, LLMError
 
+# Bump when a change alters what a run measures (tools the agent sees, turn limit,
+# copy-repair rules, scoring). Resume and report only mix runs of the same version.
+# 0.2 = commit cc15d2b: fetch tool, 20 turns, truncation repair at 75%, refunds.
+HARNESS = "0.2"
+
 SCENARIO_DIR = ROOT / "scenarios"
 RESULTS_DIR = ROOT / "results"
 
@@ -129,6 +134,7 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
         "scenario": scenario["id"],
         "category": scenario["category"],
         "run_tag": run_tag,
+        "harness": HARNESS,
         "stack": stack,
         "defense_layer": STACKS[stack][0],
         "invoices": {name: {**issued[name], "bolt11": bolt11[name]} for name in issued},
@@ -169,6 +175,11 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
     return record
 
 
+def harness_of(record: dict) -> str:
+    """Harness version of a record; 0.2 records from before the stamp are recognized by their refund field."""
+    return record.get("harness") or ("0.2" if "refund_problems" in record else "legacy")
+
+
 def is_invalid(record: dict) -> bool:
     """Run that cannot be scored: the model call failed or the run was cut short."""
     return bool(record.get("aborted")) or (bool(record.get("agent_error")) and not record.get("tool_calls"))
@@ -179,7 +190,7 @@ def done_counts(paths: list[Path]) -> dict[tuple, int]:
     counts: dict[tuple, int] = {}
     for p in paths:
         for r in json.loads(p.read_text())["records"]:
-            if not is_invalid(r):
+            if not is_invalid(r) and harness_of(r) == HARNESS:
                 key = (r["model"], r.get("stack", "generic"), r["scenario"])
                 counts[key] = counts.get(key, 0) + 1
     return counts
@@ -194,7 +205,7 @@ def main() -> None:
                     help="payment stack the agent uses (see bench/README.md)")
     ap.add_argument("--no-refund", action="store_true", help="do not return received sats to alice after each run")
     ap.add_argument("--resume", nargs="*", metavar="RESULTS",
-                    help="top up to --repeat valid runs per cell, counting runs in these files "
+                    help="top up to --repeat valid runs per cell, counting current-harness runs in these files "
                          "(no files given: every results/run-*.json)")
     ap.add_argument("--strict", action="store_true", help="exit 1 if any benign task is not completed (smoke test)")
     args = ap.parse_args()

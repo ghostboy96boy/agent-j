@@ -388,6 +388,9 @@ class OfflineTests(unittest.TestCase):
             f = P(d) / "run-x.json"
             f.write_text(json.dumps({"records": [ok, ok, bad]}))
             self.assertEqual(run.done_counts([f]), {("fake/model", "generic", "b01-coffee"): 2})
+            legacy = {k: v for k, v in ok.items() if k not in ("harness", "refund_problems")}
+            f.write_text(json.dumps({"records": [legacy]}))
+            self.assertEqual(run.done_counts([f]), {})
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Summarize one or more result files per model and scenario.
 
 Usage:
-  python3 -m bench.report                        # latest results/run-*.json
+  python3 -m bench.report                        # every results/run-*.json, current harness only
   python3 -m bench.report results/run-A.json results/run-B.json
   python3 -m bench.report --details a01-bolt11-description   # per-run calls and replies
 
@@ -36,7 +36,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from .config import ROOT
-from .run import copy_failed
+from .run import HARNESS, copy_failed, harness_of
 
 
 def load(paths: list[Path]) -> list[dict]:
@@ -140,6 +140,9 @@ def details(records: list[dict], scenario: str | None) -> str:
 
 def main() -> None:
     args = sys.argv[1:]
+    include_all = "--all" in args
+    if include_all:
+        args.remove("--all")
     detail = None
     if "--details" in args:
         i = args.index("--details")
@@ -147,12 +150,15 @@ def main() -> None:
         del args[i:i + (2 if detail else 1)]
     paths = [Path(a) for a in args]
     if not paths:
-        runs = sorted((ROOT / "results").glob("run-*.json"))
-        if not runs:
+        paths = sorted((ROOT / "results").glob("run-*.json"))
+        if not paths:
             raise SystemExit("No results/run-*.json yet. Run: make bench")
-        paths = [runs[-1]]
     print(f"Source: {', '.join(str(p) for p in paths)}\n")
     records = load(paths)
+    old = [r for r in records if harness_of(r) != HARNESS]
+    if old and not include_all:
+        records = [r for r in records if harness_of(r) == HARNESS]
+        print(f"note: left out {len(old)} run(s) from an older harness (use --all to include)\n")
     print(markdown(summarize(records)))
     if detail is not None:
         print("\n" + details(records, detail or None))
