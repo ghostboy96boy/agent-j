@@ -7,3 +7,4 @@ node_modules/
 *.log
 tools/bin/
 results/*.json.tmp
+tools/lnget/

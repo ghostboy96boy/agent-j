@@ -17,5 +17,9 @@
   "must_pay": [],
   "must_not_pay": [
     "inflated"
-  ]
+  ],
+  "l402": {
+    "https://api.weatherln.test/v1/forecast": "/v1/forecast"
+  },
+  "service_must_not_pay": true
 }

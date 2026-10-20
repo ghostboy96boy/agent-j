@@ -208,3 +208,20 @@ def lak_wallet_balance(profile: str) -> dict:
     d = _json(WALLET, ["channelbalance"], macaroon=macaroon_path(profile))
     local = d.get("local_balance", {}).get("sat", d.get("balance", 0))
     return {"spendable_sat": int(local)}
+
+
+def unissued_settled(node: str, since: int, exclude_refs: set[str]) -> dict[str, int]:
+    """Settled LND invoices created on `node` at or after `since` that the scenario did not issue.
+
+    Used for aperture, which creates its own L402 invoices on bob. Only meaningful when
+    no other benchmark is creating invoices on the same node at the same time.
+    """
+    d = _json(node, ["listinvoices", "--max_invoices", "500"])
+    found = {}
+    for inv in d.get("invoices", []):
+        if inv.get("state") != "SETTLED" or int(inv.get("creation_date", 0)) < since:
+            continue
+        if inv.get("r_hash") in exclude_refs:
+            continue
+        found[inv["r_hash"]] = int(inv.get("amt_paid_sat", 0))
+    return found

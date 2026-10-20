@@ -1,4 +1,4 @@
-.PHONY: up setup status down logs test bench bench-lak smoke models report lnget
+.PHONY: up up-lak setup status down logs test bench bench-lak bench-lnget smoke models report lnget
 
 REPEAT ?= 5
 # lnget v1.1.0 requires Go >= 1.25 (the kit's docs still say 1.21/1.24).
@@ -7,6 +7,10 @@ GO_VERSION ?= 1.25
 
 up:
 	docker compose --env-file .env up -d
+
+up-lak:
+	docker compose --env-file .env --profile lak up -d weatherln aperture
+	sleep 5 && curl -s -i http://127.0.0.1:8085/v1/forecast | head -5
 
 setup:
 	bash scripts/setup.sh
@@ -31,6 +35,9 @@ bench:
 
 bench-lak:
 	python3 -m bench.run --stack lak-lncli --repeat $(REPEAT)
+
+bench-lnget:
+	python3 -m bench.run --stack lak-lnget --scenarios a04-l402-inflated b01-coffee --repeat $(REPEAT)
 
 report:
 	python3 -m bench.report

@@ -178,7 +178,8 @@ def fetch_document(url: str, documents: dict[str, str]) -> dict:
     return {"status": 404, "body": "Not Found"}
 
 
-def make_tool_runner(known_invoices: list[str], documents: dict[str, str] | None = None, stack: str = "generic"):
+def make_tool_runner(known_invoices: list[str], documents: dict[str, str] | None = None, stack: str = "generic",
+                     l402: dict[str, str] | None = None, lnget_creds: dict | None = None):
     """Tool runner that repairs mangled invoice strings against the issued set.
 
     The agent only ever sees the normal tool result: repair metadata goes to
@@ -191,7 +192,13 @@ def make_tool_runner(known_invoices: list[str], documents: dict[str, str] | None
         meta: dict = {}
         if name == "fetch":
             runner.last_meta = {}
-            return fetch_document(str(args.get("url", "")), docs)
+            url = str(args.get("url", "")).strip()
+            path = (l402 or {}).get(url) or (l402 or {}).get(url.split("?", 1)[0].rstrip("/"))
+            if stack == "lak-lnget" and path:
+                from . import lnget
+                runner.last_meta = {"via": "lnget"}
+                return lnget.fetch(path, lnget_creds or {})
+            return fetch_document(url, docs)
         if "invoice" in args and isinstance(args["invoice"], str):
             m = match_invoice(args["invoice"], known_invoices)
             meta = {"copy_status": m["status"], "copy_distance": m["distance"]}
@@ -212,8 +219,10 @@ STACKS = {
     "generic": ("none", "Plain payment tool on alice's admin credentials"),
     "lak-lncli": ("scoped-credentials", "Lightning Agent Kit lnd skill: lncli sendpayment with the pay-only preset macaroon"),
     "lak-lncli-v2": ("scoped-credentials", "As lak-lncli, with router RPCs added to the pay-only macaroon"),
+    "lak-lnget": ("spend-cap", "Lightning Agent Kit lnget (--max-cost) against a real aperture L402 proxy; "
+                               "pay_invoice via lncli sendpayment with the pay-only macaroon"),
 }
-LAK_PROFILE = {"lak-lncli": "pay-only", "lak-lncli-v2": "pay-only-v2"}
+LAK_PROFILE = {"lak-lncli": "pay-only", "lak-lncli-v2": "pay-only-v2", "lak-lnget": "pay-only"}
 
 
 def run_tool(name: str, args: dict, stack: str = "generic") -> dict:

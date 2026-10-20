@@ -129,6 +129,7 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
     task = render(scenario["task"], bolt11, scenario)
     documents = {url: render(body, bolt11, scenario) for url, body in scenario.get("documents", {}).items()}
     started = time.time()
+    since = int(started) - 1
     record = {
         "model": model,
         "scenario": scenario["id"],
@@ -141,7 +142,8 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
     }
     client = None
     try:
-        runner = make_tool_runner(list(bolt11.values()), documents, stack)
+        runner = make_tool_runner(list(bolt11.values()), documents, stack,
+                                  l402=scenario.get("l402"), lnget_creds=LNGET_CREDS.get(LAK_PROFILE.get(stack, "")))
         client = ChatClient(model)
         transcript = run_agent(client, task, tool_runner=runner)
         record.update(
@@ -157,7 +159,13 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
                       agent_error=str(exc), aborted=True, quota_exhausted=isinstance(exc, DailyQuotaError))
     record["tokens"] = getattr(client, "tokens", 0)
     time.sleep(2)  # let the last HTLCs settle before reading the network
-    record["verdict"] = judge.score(scenario, issued, lnnodes.invoice_paid_sat, pay_paths(record["tool_calls"], bolt11))
+    service = {}
+    if stack == "lak-lnget":
+        refs = {inv["ref"] for inv in issued.values() if inv["node"] == "bob"}
+        service = lnnodes.unissued_settled("bob", since, refs)
+    record["service_payments"] = service
+    record["verdict"] = judge.score(scenario, issued, lnnodes.invoice_paid_sat, pay_paths(record["tool_calls"], bolt11),
+                                    service_paid_sat=sum(service.values()))
     calls = [c for c in record["tool_calls"] if c.get("copy_status")]
     record["invoice_calls"] = len(calls)
     record["copy_repairs"] = sum(1 for c in calls if c.get("copy_repaired"))
@@ -171,6 +179,11 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
                                    if c.get("name") == "pay_invoice" and isinstance(c.get("result"), dict)
                                    and c["result"].get("error")})
     record["refund_problems"] = refund(issued, record["verdict"]["paid_sat"]) if do_refund else []
+    if do_refund and service:
+        try:
+            lnnodes.return_to_wallet("bob", sum(service.values()))
+        except lnnodes.NodeError as exc:
+            record["refund_problems"].append(f"service: {str(exc)[:120]}")
     record["seconds"] = round(time.time() - started, 1)
     return record
 
@@ -178,6 +191,16 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
 def harness_of(record: dict) -> str:
     """Harness version of a record; 0.2 records from before the stamp are recognized by their refund field."""
     return record.get("harness") or ("0.2" if "refund_problems" in record else "legacy")
+
+
+LNGET_CREDS: dict[str, dict] = {}
+
+
+def other_bench_running() -> bool:
+    import os
+    import subprocess
+    out = subprocess.run(["pgrep", "-f", "bench.run"], capture_output=True, text=True).stdout.split()
+    return any(int(pid) != os.getpid() for pid in out if pid.isdigit())
 
 
 def is_invalid(record: dict) -> bool:
@@ -214,6 +237,12 @@ def main() -> None:
     scenarios = load_scenarios(args.scenarios)
     if args.stack in LAK_PROFILE:
         print(f"stack {args.stack}: macaroon {lnnodes.ensure_macaroon(LAK_PROFILE[args.stack])}")
+    if args.stack == "lak-lnget":
+        if other_bench_running():
+            raise SystemExit("lak-lnget attributes bob's L402 invoices by time window; stop other benches first")
+        from . import lnget
+        LNGET_CREDS[LAK_PROFILE[args.stack]] = lnget.prepare(LAK_PROFILE[args.stack])
+        print(f"lnget: {lnget.BIN}, max-cost {lnget.MAX_COST_SAT} sat, proxy {lnget.APERTURE}", flush=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     records = []
     RESULTS_DIR.mkdir(exist_ok=True)

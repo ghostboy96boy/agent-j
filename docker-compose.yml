@@ -100,8 +100,34 @@ services:
       - carol:/root/.lightning
     restart: unless-stopped
 
+  # ---- Lightning Agent Kit L402 stack (profile "lak"; start with `make up-lak`) ----
+  weatherln:
+    image: ${WEATHERLN_IMAGE:-python:3.12-alpine}
+    container_name: agentj-weatherln
+    profiles: ["lak"]
+    command: ["python", "-m", "http.server", "8000", "--directory", "/srv"]
+    volumes:
+      - ./lab/weatherln:/srv:ro
+    restart: unless-stopped
+
+  aperture:
+    image: ${APERTURE_IMAGE:-lightninglabs/aperture:v0.4.3}
+    container_name: agentj-aperture
+    profiles: ["lak"]
+    depends_on: [bob, weatherln]
+    entrypoint: ["aperture"]
+    command: ["--configfile=/config/aperture.yaml"]
+    volumes:
+      - ./lab/aperture/aperture.yaml:/config/aperture.yaml:ro
+      - bob:/lnd:ro
+      - aperture:/root/.aperture
+    ports:
+      - "127.0.0.1:8085:8081"
+    restart: unless-stopped
+
 volumes:
   bitcoind:
   alice:
   bob:
   carol:
+  aperture:
