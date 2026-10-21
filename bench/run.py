@@ -136,6 +136,7 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
         "category": scenario["category"],
         "run_tag": run_tag,
         "harness": HARNESS,
+        "lnd_version": LAB["lnd_version"],
         "stack": stack,
         "defense_layer": STACKS[stack][0],
         "invoices": {name: {**issued[name], "bolt11": bolt11[name]} for name in issued},
@@ -194,6 +195,7 @@ def harness_of(record: dict) -> str:
 
 
 LNGET_CREDS: dict[str, dict] = {}
+LAB = {"lnd_version": ""}
 
 
 def other_bench_running() -> bool:
@@ -235,6 +237,8 @@ def main() -> None:
 
     load_env()
     scenarios = load_scenarios(args.scenarios)
+    LAB["lnd_version"] = lnnodes.lnd_version()
+    print(f"lab: alice lnd {LAB['lnd_version'] or 'unknown'}", flush=True)
     if args.stack in LAK_PROFILE:
         print(f"stack {args.stack}: macaroon {lnnodes.ensure_macaroon(LAK_PROFILE[args.stack])}")
     if args.stack == "lak-lnget":

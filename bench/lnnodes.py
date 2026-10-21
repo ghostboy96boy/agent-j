@@ -234,3 +234,11 @@ def unissued_settled(node: str, since: int, exclude_refs: set[str]) -> dict[str,
             continue
         found[inv["r_hash"]] = int(inv.get("amt_paid_sat", 0))
     return found
+
+
+def lnd_version(node: str = WALLET) -> str:
+    try:
+        d = _json(node, ["version"])
+        return d.get("lnd", {}).get("version") or d.get("version", "")
+    except NodeError:
+        return ""
