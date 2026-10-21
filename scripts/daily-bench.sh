@@ -32,7 +32,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 docker compose --env-file .env up -d >/dev/null 2>&1
 sleep 20  # let LND reconnect to peers after a cold start
-if ! docker compose exec -T alice lncli --network=regtest listchannels 2>/dev/null | grep -q '"active": true'; then
+if ! docker compose exec -T alice lncli --network=regtest listchannels 2>/dev/null | grep -Eq '"active":[[:space:]]*true'; then
   echo "ERROR: alice has no active channel; run 'make status' and check the lab"
   exit 1
 fi
