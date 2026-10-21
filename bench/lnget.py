@@ -76,6 +76,11 @@ def fetch(path: str, creds: dict, max_cost: int = MAX_COST_SAT, timeout: int = 1
             return {"exit_code": None, "error": f"lnget timed out after {timeout}s"}
     out = (proc.stdout or "").strip()
     err = (proc.stderr or "").strip()
+    # On errors lnget prints its whole --help before the JSON error; keep only the JSON
+    # lines so the agent sees what a script parsing lnget's output would see.
+    json_err = [ln for ln in err.splitlines() if ln.lstrip().startswith("{")]
+    if json_err:
+        err = "\n".join(json_err)
     meaning = {0: "ok", 1: "general error", 2: "payment exceeds max cost", 3: "payment failed",
                4: "network/connection error"}.get(proc.returncode, "unknown")
     return {"exit_code": proc.returncode, "meaning": meaning, "output": out[-2000:], "stderr": err[-1000:]}
