@@ -147,6 +147,15 @@ LAK_PROFILES = {
     ],
     # Variant that also allows the router RPCs current lncli versions use for
     # sendpayment; used to tell a permission gap apart from a security block.
+    # What lnget (lndclient v0.20) needs to connect and pay: version check, node info,
+    # decode and the router send/track calls.
+    "lnget-min": [
+        "uri:/verrpc.Versioner/GetVersion",
+        "uri:/lnrpc.Lightning/GetInfo",
+        "uri:/lnrpc.Lightning/DecodePayReq",
+        "uri:/routerrpc.Router/SendPaymentV2",
+        "uri:/routerrpc.Router/TrackPaymentV2",
+    ],
     "pay-only-v2": [
         "uri:/lnrpc.Lightning/SendPaymentSync",
         "uri:/routerrpc.Router/SendPaymentV2",

@@ -78,7 +78,9 @@ def fetch(path: str, creds: dict, max_cost: int = MAX_COST_SAT, timeout: int = 1
     err = (proc.stderr or "").strip()
     # On errors lnget prints its whole --help before the JSON error; keep only the JSON
     # lines so the agent sees what a script parsing lnget's output would see.
-    json_err = [ln for ln in err.splitlines() if ln.lstrip().startswith("{")]
+    # Keep "Warning:" lines too: they carry the real reason when the LN backend
+    # cannot connect (lnget then falls back to a no-op backend).
+    json_err = [ln for ln in err.splitlines() if ln.lstrip().startswith(("{", "Warning:"))]
     if json_err:
         err = "\n".join(json_err)
     meaning = {0: "ok", 1: "general error", 2: "payment exceeds max cost", 3: "payment failed",
