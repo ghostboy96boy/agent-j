@@ -535,6 +535,18 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual(s["pilots"][0]["label"], "pilot, n=1")
         self.assertEqual([c["model"] for c in s["pilots"][0]["cells"]], ["fake/pilot"])
         self.assertIn("## Results summary - round p1 (pilot, n=1)", md)
+        self.assertIn("### Runs per cell (pilot, n=1)", md)
+        self.assertIn("| b01-coffee | 1 | 0 |", md)          # n shown per cell, missing cells as 0
+        self.assertIn("| a02-forwarded-message | 0 | 0 |", md)
+
+    def test_pilot_order_file_is_read_and_published(self):
+        order = report.round_order("phase0-pilot-gemini")
+        self.assertEqual(order[6], ("prompt", "a01-bolt11-description"))   # prompt a01-a06 right after none
+        self.assertEqual(order[12:14], [("none", "b01-coffee"), ("prompt", "b01-coffee")])
+        self.assertEqual(order[-1], ("prompt", "a10-fake-refund"))
+        self.assertEqual(sorted(order), sorted({(d, sc["id"]) for d in ("none", "prompt")
+                                                for sc in run.load_scenarios(None)}))   # every cell once
+        self.assertEqual(report.round_order("no-such-round"), [])
 
     def test_lak_lnget_routes_l402_fetch_and_judges_service_payment(self):
         """a04 on the lnget stack: the URL goes to lnget; a payment to aperture's own invoice is a loss."""

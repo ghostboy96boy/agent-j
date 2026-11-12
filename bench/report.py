@@ -272,6 +272,26 @@ def cell_name(c: dict) -> str:
     return c["model"] if c["stack"] == "generic" else f"{c['model']} [{c['stack']}]"
 
 
+def round_order(name: str | None) -> list[tuple[str, str]]:
+    """(defense, scenario) lines of bench/rounds/<name>.order, or [] when the round has no fixed order."""
+    path = ROOT / "bench" / "rounds" / f"{name}.order"
+    if not name or not path.exists():
+        return []
+    rows = [ln.split() for ln in path.read_text().splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    return [(r[0], r[1]) for r in rows]
+
+
+def cell_counts(records: list[dict]) -> list[dict]:
+    """Runs per model x defense x scenario: valid, model errors and invalid, so every cell's n is visible."""
+    per: dict = defaultdict(Counter)
+    for r in records:
+        kind = "model_error" if is_model_error(r) else ("invalid" if is_error(r) else "valid")
+        per[(r["model"], r.get("defense", "none"), r["scenario"])][kind] += 1
+    return [{"model": m, "defense": d, "scenario": sc, "valid": c["valid"],
+             "model_error": c["model_error"], "invalid": c["invalid"]}
+            for (m, d, sc), c in sorted(per.items())]
+
+
 def pilot_label(records: list[dict]) -> str:
     """'pilot, n=K': K is the most valid runs any scenario x defense cell has, read from the data."""
     per: Counter = Counter((r["model"], r.get("defense", "none"), r["scenario"]) for r in records if not is_error(r))
@@ -308,6 +328,26 @@ def summary_markdown(s: dict, heading: str = "#") -> str:
         for cat in sorted({b["category"] for b in s["by_category"]}):
             row = [fmt_rate(table[k + (cat,)]["attack_success"]) if k + (cat,) in table else "-" for k in cols]
             lines.append(f"| {cat} | " + " | ".join(row) + " |")
+    if s.get("order"):
+        lines += ["", f"{heading}# Execution order{' (' + s['label'] + ')' if s.get('label') else ''}", "",
+                  "Only the order of runs changed; scenarios and judge are the same as in every round: "
+                  + ", ".join(f"{d} {sc.split('-')[0]}" for d, sc in s["order"]) + "."]
+    if s.get("cell_counts"):
+        models = sorted({c["model"] for c in s["cell_counts"]})
+        defenses = ["none", "prompt"]
+        by = {(c["model"], c["defense"], c["scenario"]): c for c in s["cell_counts"]}
+        lines += ["", f"{heading}# Runs per cell{' (' + s['label'] + ')' if s.get('label') else ''}", "",
+                  "Valid runs (n) per scenario; model errors and invalid runs in brackets when present.", "",
+                  "| scenario | " + " | ".join(f"{m} / {d}" for m in models for d in defenses) + " |",
+                  "|---|" + "---|" * (len(models) * len(defenses))]
+        for sc in s.get("all_scenarios") or s["scenarios"]:
+            row = []
+            for m in models:
+                for d in defenses:
+                    c = by.get((m, d, sc))
+                    extra = [f"{c[k]} {k.replace('_', ' ')}" for k in ("model_error", "invalid") if c and c[k]]
+                    row.append(f"{c['valid'] if c else 0}" + (f" ({', '.join(extra)})" if extra else ""))
+            lines.append(f"| {sc} | " + " | ".join(row) + " |")
     return "\n".join(lines) + "\n"
 
 
@@ -320,6 +360,9 @@ def write_summary(records: list[dict], out_dir: Path, round_name: str | None = N
     for name, recs in (pilots or {}).items():
         p = build_summary(recs, scenarios, name)
         p["label"] = pilot_label(recs)
+        p["order"] = round_order(name)
+        p["cell_counts"] = cell_counts(recs)
+        p["all_scenarios"] = sorted(sc["id"] for sc in scenarios)
         s["pilots"].append(p)
     md = summary_markdown(s)
     for p in s["pilots"]:
