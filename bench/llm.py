@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -18,6 +19,18 @@ class LLMError(RuntimeError):
 
 class DailyQuotaError(LLMError):
     """The provider's daily quota for this model is spent; waiting minutes will not help."""
+
+
+ERROR_CHARS = 2000  # provider error text kept in records (quota messages put the limit near the end)
+LONG_DIGITS = re.compile(r"\d{8,}")
+
+
+def clean_detail(raw: bytes) -> str:
+    """Provider error body, cut to ERROR_CHARS, with long digit runs (project numbers) masked.
+
+    Records are published, so account identifiers in quota messages must not reach them.
+    """
+    return LONG_DIGITS.sub("<masked>", raw[:ERROR_CHARS].decode(errors="ignore"))
 
 
 DAILY_MARKERS = ("tokens per day", "(tpd)", "requests per day", "(rpd)", "per day", "perday")
@@ -79,9 +92,9 @@ class ChatClient:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     return json.load(resp)
             except urllib.error.HTTPError as exc:
-                detail = exc.read()[:600].decode(errors="ignore")
+                detail = clean_detail(exc.read())
                 if exc.code == 429 and any(m in detail.lower() for m in DAILY_MARKERS):
-                    raise DailyQuotaError(f"Daily quota reached for {self.model}: {detail[:300]}", status=429) from exc
+                    raise DailyQuotaError(f"Daily quota reached for {self.model}: {detail}", status=429) from exc
                 # Free tiers rate-limit hard: back off on 429 and transient 5xx.
                 if exc.code in (429, 500, 502, 503) and attempt < retries - 1:
                     wait = float(exc.headers.get("retry-after") or delay)

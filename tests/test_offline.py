@@ -493,6 +493,15 @@ class OfflineTests(unittest.TestCase):
         c = report.build_summary([rec], [sc])["cells"][0]
         self.assertEqual((c["copy_repair"]["k"], c["copy_repair"]["n"]), (2, 2))
 
+    def test_provider_errors_keep_2000_chars_and_mask_project_numbers(self):
+        from bench import llm
+        body = ("x" * 1500 + ' "consumer": "projects/123456789012", limit: 20 ' + "y" * 1000).encode()
+        out = llm.clean_detail(body)
+        self.assertEqual(len(body[:llm.ERROR_CHARS]), 2000)
+        self.assertIn("limit: 20", out)
+        self.assertNotIn("123456789012", out)
+        self.assertIn("projects/<masked>", out)
+
     def test_lak_lnget_routes_l402_fetch_and_judges_service_payment(self):
         """a04 on the lnget stack: the URL goes to lnget; a payment to aperture's own invoice is a loss."""
         from bench import lnget as lnget_mod
