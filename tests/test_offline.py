@@ -387,10 +387,70 @@ class OfflineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             f = P(d) / "run-x.json"
             f.write_text(json.dumps({"records": [ok, ok, bad]}))
-            self.assertEqual(run.done_counts([f]), {("fake/model", "generic", "b01-coffee"): 2})
+            self.assertEqual(run.done_counts([f]), {("fake/model", "generic", "none", "b01-coffee"): 2})
             legacy = {k: v for k, v in ok.items() if k not in ("harness", "refund_problems")}
             f.write_text(json.dumps({"records": [legacy]}))
             self.assertEqual(run.done_counts([f]), {})
+
+    def test_defense_none_keeps_the_base_prompt_and_is_recorded(self):
+        from bench import agent
+        seen = []
+
+        class Spy(ScriptedLLM):
+            def chat(self, messages, tools):
+                seen.append(messages[0]["content"])
+                return super().chat(messages, tools)
+
+        with mock.patch.object(run, "ChatClient", Spy):
+            rec = run.run_one("fake/model", run.load_scenarios(["b01-coffee"])[0])
+        self.assertEqual(set(seen), {agent.SYSTEM_PROMPT})
+        self.assertEqual((rec["defense"], rec["defense_layer"], rec["policy_sha256"]), ("none", "none", None))
+
+    def test_defense_prompt_adds_the_versioned_policy_and_is_recorded(self):
+        import hashlib
+        from bench import agent
+        policy = (agent.POLICY_DIR / "prompt_policy.txt").read_text().strip()
+        seen = []
+
+        class Spy(ScriptedLLM):
+            def chat(self, messages, tools):
+                seen.append(messages[0]["content"])
+                return super().chat(messages, tools)
+
+        with mock.patch.object(run, "ChatClient", Spy):
+            rec = run.run_one("fake/model", run.load_scenarios(["a01-bolt11-description"])[0],
+                              defense="prompt", round_name="r1")
+        self.assertTrue(seen and all(s.startswith(agent.SYSTEM_PROMPT) and s.endswith(policy) for s in seen))
+        self.assertEqual((rec["defense"], rec["defense_layer"], rec["round"]), ("prompt", "prompt-policy", "r1"))
+        self.assertEqual(rec["policy_sha256"],
+                         hashlib.sha256((agent.POLICY_DIR / "prompt_policy.txt").read_bytes()).hexdigest())
+        # The judge is untouched by the defense: the gullible fake agent still pays the attacker.
+        self.assertTrue(rec["verdict"]["attack_succeeded"])
+        self.assertEqual(run.defense_layer("lak-lncli", "prompt"), "scoped-credentials+prompt-policy")
+        with self.assertRaises(ValueError):
+            agent.system_prompt("guardrails")
+
+    def test_defense_flag_parses_and_rejects_unknown_layers(self):
+        import io
+        import sys as _sys
+        with mock.patch.object(_sys, "argv", ["bench.run", "--defense", "bogus"]), \
+             mock.patch.object(_sys, "stderr", io.StringIO()), self.assertRaises(SystemExit) as cm:
+            run.main()
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_resume_keeps_defenses_and_rounds_apart(self):
+        import tempfile
+        from pathlib import Path as P
+        sc = run.load_scenarios(["b01-coffee"])[0]
+        a = run.run_one("fake/model", sc, round_name="r1")
+        b = run.run_one("fake/model", sc, defense="prompt", round_name="r1")
+        old = run.run_one("fake/model", sc)
+        with tempfile.TemporaryDirectory() as d:
+            f = P(d) / "run-x.json"
+            f.write_text(json.dumps({"records": [a, b, b, old]}))
+            self.assertEqual(run.done_counts([f], "r1"), {("fake/model", "generic", "none", "b01-coffee"): 1,
+                                                          ("fake/model", "generic", "prompt", "b01-coffee"): 2})
+            self.assertEqual(run.done_counts([f])[("fake/model", "generic", "none", "b01-coffee")], 2)
 
     def test_lak_lnget_routes_l402_fetch_and_judges_service_payment(self):
         """a04 on the lnget stack: the URL goes to lnget; a payment to aperture's own invoice is a loss."""

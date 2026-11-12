@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import judge, lnnodes
-from .agent import LAK_PROFILE, STACKS, make_tool_runner, run_agent
+from .agent import DEFENSES, LAK_PROFILE, STACKS, make_tool_runner, policy_sha256, run_agent
 from .config import DEFAULT_MODELS, ROOT, load_env
 from .llm import ChatClient, DailyQuotaError, LLMError
 
@@ -123,7 +123,16 @@ def refund(issued: dict, paid: dict) -> list[str]:
     return problems
 
 
-def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "generic") -> dict:
+def defense_layer(stack: str, defense: str) -> str:
+    """Defense layers a run had: the stack's, plus the prompt policy if enabled."""
+    layers = [STACKS[stack][0]] if STACKS[stack][0] != "none" else []
+    if defense == "prompt":
+        layers.append("prompt-policy")
+    return "+".join(layers) or "none"
+
+
+def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "generic",
+            defense: str = "none", round_name: str | None = None) -> dict:
     run_tag = uuid.uuid4().hex[:8]
     issued, bolt11 = issue_invoices(scenario, run_tag)
     task = render(scenario["task"], bolt11, scenario)
@@ -138,7 +147,10 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
         "harness": HARNESS,
         "lnd_version": LAB["lnd_version"],
         "stack": stack,
-        "defense_layer": STACKS[stack][0],
+        "defense": defense,
+        "defense_layer": defense_layer(stack, defense),
+        "policy_sha256": policy_sha256(defense),
+        "round": round_name,
         "invoices": {name: {**issued[name], "bolt11": bolt11[name]} for name in issued},
     }
     client = None
@@ -146,7 +158,7 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
         runner = make_tool_runner(list(bolt11.values()), documents, stack,
                                   l402=scenario.get("l402"), lnget_creds=LNGET_CREDS.get(LAK_PROFILE.get(stack, "")))
         client = ChatClient(model)
-        transcript = run_agent(client, task, tool_runner=runner)
+        transcript = run_agent(client, task, tool_runner=runner, defense=defense)
         record.update(
             tool_calls=transcript.tool_calls,
             final_text=transcript.final_text,
@@ -210,13 +222,19 @@ def is_invalid(record: dict) -> bool:
     return bool(record.get("aborted")) or (bool(record.get("agent_error")) and not record.get("tool_calls"))
 
 
-def done_counts(paths: list[Path]) -> dict[tuple, int]:
-    """(model, stack, scenario) -> number of valid runs already in these result files."""
+def done_counts(paths: list[Path], round_name: str | None = None) -> dict[tuple, int]:
+    """(model, stack, defense, scenario) -> number of valid runs already in these result files.
+
+    With round_name, only runs tagged with that round count, so a new round is not
+    filled up with older runs of the same cell.
+    """
     counts: dict[tuple, int] = {}
     for p in paths:
         for r in json.loads(p.read_text())["records"]:
+            if round_name is not None and r.get("round") != round_name:
+                continue
             if not is_invalid(r) and harness_of(r) == HARNESS:
-                key = (r["model"], r.get("stack", "generic"), r["scenario"])
+                key = (r["model"], r.get("stack", "generic"), r.get("defense", "none"), r["scenario"])
                 counts[key] = counts.get(key, 0) + 1
     return counts
 
@@ -228,6 +246,10 @@ def main() -> None:
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--stack", default="generic", choices=sorted(STACKS),
                     help="payment stack the agent uses (see bench/README.md)")
+    ap.add_argument("--defense", default="none", choices=sorted(DEFENSES),
+                    help="none: base system prompt; prompt: add the spending policy in bench/policies/prompt_policy.txt")
+    ap.add_argument("--round", dest="round_name", metavar="NAME",
+                    help="tag every record with this round; with --resume, count only runs of this round")
     ap.add_argument("--no-refund", action="store_true", help="do not return received sats to alice after each run")
     ap.add_argument("--resume", nargs="*", metavar="RESULTS",
                     help="top up to --repeat valid runs per cell, counting current-harness runs in these files "
@@ -254,16 +276,19 @@ def main() -> None:
     already: dict[tuple, int] = {}
     if args.resume is not None:
         paths = [Path(x) for x in args.resume] or sorted(RESULTS_DIR.glob("run-*.json"))
-        already = done_counts(paths)
+        already = done_counts(paths, args.round_name)
         print(f"resume: counting valid runs in {len(paths)} file(s)", flush=True)
-    todo = {(m, sc["id"]): max(0, args.repeat - already.get((m, args.stack, sc["id"]), 0))
+    print(f"defense: {args.defense} (layer {defense_layer(args.stack, args.defense)})"
+          + (f", round {args.round_name}" if args.round_name else ""), flush=True)
+    todo = {(m, sc["id"]): max(0, args.repeat - already.get((m, args.stack, args.defense, sc["id"]), 0))
             for m in args.models for sc in scenarios}
     total = sum(todo.values())
     print(f"{total} runs -> {out.relative_to(ROOT)} (saved after every run)", flush=True)
 
     def save() -> None:
         tmp = out.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"created": stamp, "stack": args.stack, "defense_layer": STACKS[args.stack][0],
+        tmp.write_text(json.dumps({"created": stamp, "stack": args.stack, "defense": args.defense,
+                                   "defense_layer": defense_layer(args.stack, args.defense), "round": args.round_name,
                                    "complete": len(records) == total, "records": records}, indent=2))
         tmp.replace(out)
     out_of_quota: list[str] = []
@@ -272,9 +297,10 @@ def main() -> None:
         for sc in scenarios:
             if quota_hit:
                 break
-            start = already.get((model, args.stack, sc["id"]), 0)
+            start = already.get((model, args.stack, args.defense, sc["id"]), 0)
             for i in range(start, start + todo[(model, sc["id"])]):
-                rec = run_one(model, sc, do_refund=not args.no_refund, stack=args.stack)
+                rec = run_one(model, sc, do_refund=not args.no_refund, stack=args.stack,
+                              defense=args.defense, round_name=args.round_name)
                 records.append(rec)
                 save()
                 v = rec["verdict"]
@@ -298,6 +324,7 @@ def main() -> None:
                 if rec["copy_ambiguous"]:
                     fix += f"  ({rec['copy_ambiguous']} ambiguous copy)"
                 tag = model if args.stack == "generic" else f"{model} [{args.stack}]"
+                tag += f" /{args.defense}"
                 print(f"[{len(records)}/{total}] {tag:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} "
                       f"lost={v['sats_lost']} sat  {rec['seconds']}s  {rec['tokens']} tok{fix}", flush=True)
                 if rec["agent_error"]:
@@ -315,7 +342,8 @@ def main() -> None:
         print(f"tokens per valid run: mean {sum(toks) // len(toks)}, max {max(toks)}")
     if out_of_quota:
         print(f"daily quota reached for: {', '.join(out_of_quota)}. "
-              f"Next day: python3 -m bench.run --resume --repeat {args.repeat} --models {' '.join(args.models)}")
+              f"Next day: python3 -m bench.run --resume --repeat {args.repeat} --defense {args.defense}"
+              + (f" --round {args.round_name}" if args.round_name else "") + f" --models {' '.join(args.models)}")
     errors = sum(1 for r in records if is_invalid(r) and not r.get("quota_exhausted"))
     if errors:
         print(f"{errors} run(s) failed before the agent acted; see errors above.")
