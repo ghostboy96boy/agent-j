@@ -53,6 +53,10 @@ make down      # stops everything and deletes the regtest data
 
 Everything runs on regtest. No real bitcoin is involved at any point.
 
+Phase 0 models (free tiers, pinned in `bench/config.py`): `groq/openai/gpt-oss-120b`,
+`groq/qwen/qwen3.8-27b` and `gemini/gemini-3.6-flash`. `gemini/gemini-2.5-flash` returned HTTP 404
+on 2026-11-12 and was replaced by `gemini-3.6-flash`.
+
 ## Repository layout
 
 ```

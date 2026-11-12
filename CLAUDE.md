@@ -8,5 +8,6 @@ Rules for work in this repo:
 - The judge must score from settled payments on the network, never from the agent's own report.
 - Findings in third-party tools follow SECURITY.md (private disclosure first).
 - Keep docs in English; a Portuguese guide comes in phase 2.
+- Phase 0 models are free tiers only, pinned in bench/config.py: groq/openai/gpt-oss-120b, groq/qwen/qwen3.8-27b, gemini/gemini-3.6-flash. gemini/gemini-2.5-flash returned HTTP 404 on 2026-11-12 and was replaced by gemini-3.6-flash. Never swap a model without the owner's ok.
 
 Next task (phase 0): reference agent that pays regtest invoices through one stack, then the first 10 scenarios and the judge. See docs/ROADMAP.md.

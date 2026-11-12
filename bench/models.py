@@ -12,7 +12,7 @@ refusing calls to them. Each default model gets one of:
 
 Usage:
   python3 -m bench.models                                  # check DEFAULT_MODELS; exit 1 if any is not OK
-  python3 -m bench.models gemini/gemini-3.7-flash ...      # check these models instead
+  python3 -m bench.models gemini/gemini-3.6-flash ...      # check these models instead
 """
 from __future__ import annotations
 
