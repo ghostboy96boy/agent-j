@@ -563,6 +563,26 @@ class OfflineTests(unittest.TestCase):
                                                 for sc in run.load_scenarios(None)}))   # every cell once
         self.assertEqual(report.round_order("no-such-round"), [])
 
+    def test_cutoff_drops_files_started_after_it_and_is_published(self):
+        import tempfile
+        from pathlib import Path as P
+        cut = report.parse_cutoff("2026-11-18T00:00-03:00")
+        self.assertIsNone(report.file_time(P("summary.json")))
+        self.assertLess(report.file_time(P("results/run-20261118T025959Z.json")), cut)    # 23:59:59 BRT
+        self.assertGreater(report.file_time(P("results/run-20261118T030001Z.json")), cut)
+        with self.assertRaises(SystemExit):
+            report.parse_cutoff("2026-11-18T00:00")                                      # offset required
+        b01 = run.load_scenarios(["b01-coffee"])[0]
+        recs = [run.run_one("fake/model", b01, round_name="r1")]
+        with tempfile.TemporaryDirectory() as d:
+            s = report.write_summary(recs, P(d), "r1", cutoff=cut, code={"head": "abc1234", "at_round_start": "def5678",
+                                                                        "during_round": ["1111111 2026 x"]})
+            md = (P(d) / "summary.md").read_text()
+        self.assertEqual(s["cutoff"], "2026-11-18T00:00:00-03:00")
+        self.assertIn("Data frozen at 2026-11-18T00:00:00-03:00", md)
+        self.assertIn("HEAD abc1234; at round start def5678; harness commits during the round: 1111111.", md)
+        self.assertIn("| b01-coffee | 1 | 0 |", md)                                     # n per cell, main round too
+
     def test_gemma_order_pairs_defenses_and_repeats_three_times(self):
         order = report.round_order("phase0-r1-gemma")
         self.assertEqual(len(order), 13 * 2 * 3)
