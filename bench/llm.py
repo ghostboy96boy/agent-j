@@ -8,7 +8,9 @@ import time
 import urllib.error
 import urllib.request
 
-from .config import resolve
+from pathlib import Path
+
+from .config import ROOT, resolve
 
 
 class LLMError(RuntimeError):
@@ -31,6 +33,23 @@ def clean_detail(raw: bytes) -> str:
     Records are published, so account identifiers in quota messages must not reach them.
     """
     return LONG_DIGITS.sub("<masked>", raw[:ERROR_CHARS].decode(errors="ignore"))
+
+
+ERROR_DIR = ROOT / "results" / "private" / "http-errors"  # gitignored
+
+
+def save_full_error(model: str, code: int, headers, raw: bytes) -> Path:
+    """Keep the whole body of a 429 (not cut to ERROR_CHARS) plus its rate-limit headers, so the
+    limit the provider states can be read in full. Long digit runs are still masked; the file
+    lives under results/private/, which is never committed."""
+    ERROR_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    path = ERROR_DIR / f"{stamp}-{re.sub(r'[^A-Za-z0-9.-]+', '_', model)}-{code}.txt"
+    kept = [f"{k}: {v}" for k, v in (headers.items() if headers else [])
+            if k.lower() == "retry-after" or "ratelimit" in k.lower()]
+    body = LONG_DIGITS.sub("<masked>", raw.decode(errors="ignore"))
+    path.write_text(f"model: {model}\nHTTP {code}\n" + "\n".join(kept) + "\n\n" + body + "\n")
+    return path
 
 
 DAILY_MARKERS = ("tokens per day", "(tpd)", "requests per day", "(rpd)", "per day", "perday")
@@ -92,7 +111,10 @@ class ChatClient:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     return json.load(resp)
             except urllib.error.HTTPError as exc:
-                detail = clean_detail(exc.read())
+                raw = exc.read()
+                detail = clean_detail(raw)
+                if exc.code == 429:
+                    save_full_error(self.model, exc.code, exc.headers, raw)
                 if exc.code == 429 and any(m in detail.lower() for m in DAILY_MARKERS):
                     raise DailyQuotaError(f"Daily quota reached for {self.model}: {detail}", status=429) from exc
                 # Free tiers rate-limit hard: back off on 429 and transient 5xx.
