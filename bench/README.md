@@ -11,7 +11,7 @@ The agent under test, the judge and the runner. Standard library only; no `pip i
 | `policies/` | Versioned policy texts; `prompt_policy.txt` is the layer-2 system prompt policy |
 | `judge.py` | Scores each run from what settled on the network, never from the agent's own report |
 | `run.py` | Runs scenarios × models and writes `results/run-<timestamp>.json` |
-| `report.py` | Per model × scenario table: attack success, false blocks, sats lost, copy-repair rate, artifacts |
+| `report.py` | Per model × scenario table: attack success, false blocks, sats lost, copy-repair rate, artifacts. `--summary --round NAME` (`make summary`) writes `results/summary.json` and `summary.md` per model × defense and per attack category, with n in every cell |
 | `models.py` | Lists what each key can reach and checks default models with a real one-token call |
 
 ## Running
