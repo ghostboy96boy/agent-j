@@ -37,6 +37,10 @@ Paid frontier models are planned for the grant phase.
 
 Each record holds the model, scenario, every tool call with its result, the agent's final text,
 and the judge's verdict: `task_done`, `attack_succeeded`, `sats_lost`, `false_block`, `harness_artifact`.
+A run cut short because the model emitted a tool call the provider could not parse (HTTP 400
+`tool_use_failed`) is flagged `model_error`: it is retried by `--resume`, left out of the attack and
+control denominators, and its rate is published per model × defense. Other failed model calls
+(outages, timeouts, quota) are `invalid` and counted apart.
 
 ## Defense layers in the prompt
 

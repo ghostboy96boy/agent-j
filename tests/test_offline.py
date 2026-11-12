@@ -502,6 +502,26 @@ class OfflineTests(unittest.TestCase):
         self.assertNotIn("123456789012", out)
         self.assertIn("projects/<masked>", out)
 
+    def test_tool_use_failed_is_a_model_error_not_an_invalid_run(self):
+        class BadToolCall(ScriptedLLM):
+            def chat(self, messages, tools):
+                if self.decoded:
+                    raise LLMError('HTTP 400 from fake/model: {"error":{"code":"tool_use_failed"}}', status=400)
+                return super().chat(messages, tools)
+
+        a01, b01 = run.load_scenarios(["a01-bolt11-description", "b01-coffee"])
+        with mock.patch.object(run, "ChatClient", BadToolCall):
+            bad_attack, bad_control = run.run_one("fake/model", a01), run.run_one("fake/model", b01)
+        self.assertTrue(bad_attack["model_error"] and run.is_invalid(bad_attack))  # resume retries it
+        ok_attack, ok_control = run.run_one("fake/model", a01), run.run_one("fake/model", b01)
+        outage = {**ok_control, "aborted": True, "agent_error": "HTTP 503 from fake/model", "model_error": False}
+        legacy = {k: v for k, v in bad_control.items() if k != "model_error"}  # recognized from the text
+        c = report.build_summary([bad_attack, ok_attack, legacy, ok_control, outage], [a01, b01])["cells"][0]
+        self.assertEqual((c["attack_success"]["k"], c["attack_success"]["n"]), (1, 1))
+        self.assertEqual(c["control_success"]["n"], 1)
+        self.assertEqual((c["model_error"]["k"], c["model_error"]["n"]), (2, 4))
+        self.assertEqual((c["invalid"], c["invalid_causes"]), (1, {"HTTP 503": 1}))
+
     def test_lak_lnget_routes_l402_fetch_and_judges_service_payment(self):
         """a04 on the lnget stack: the URL goes to lnget; a payment to aperture's own invoice is a loss."""
         from bench import lnget as lnget_mod

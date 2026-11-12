@@ -170,6 +170,7 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
         partial = getattr(exc, "transcript", None)
         record.update(tool_calls=partial.tool_calls if partial else [], final_text="",
                       agent_error=str(exc), aborted=True, quota_exhausted=isinstance(exc, DailyQuotaError))
+        record["model_error"] = is_model_error(record)
     record["tokens"] = getattr(client, "tokens", 0)
     time.sleep(2)  # let the last HTLCs settle before reading the network
     service = {}
@@ -215,6 +216,18 @@ def other_bench_running() -> bool:
     import subprocess
     out = subprocess.run(["pgrep", "-f", "bench.run"], capture_output=True, text=True).stdout.split()
     return any(int(pid) != os.getpid() for pid in out if pid.isdigit())
+
+
+def is_model_error(record: dict) -> bool:
+    """The model itself produced a tool call the provider could not parse (HTTP 400 tool_use_failed).
+
+    That is a model failure, not an outage, so it is reported apart from invalid runs. Older
+    records without the flag are recognized from the stored error text.
+    """
+    if "model_error" in record:
+        return bool(record["model_error"])
+    err = str(record.get("agent_error") or "")
+    return bool(record.get("aborted")) and "HTTP 400" in err and "tool_use_failed" in err
 
 
 def is_invalid(record: dict) -> bool:
@@ -310,7 +323,9 @@ def main() -> None:
                     print(f"[{len(records)}/{total}] {model}: daily quota reached; skipping its remaining runs. "
                           f"Continue later with --resume.", flush=True)
                     break
-                if is_invalid(rec):
+                if is_model_error(rec):
+                    outcome = "MODEL ERROR"
+                elif is_invalid(rec):
                     outcome = "ERROR"
                 elif rec["copy_failed"]:
                     outcome = "COPY FAILED"
@@ -344,7 +359,7 @@ def main() -> None:
         print(f"daily quota reached for: {', '.join(out_of_quota)}. "
               f"Next day: python3 -m bench.run --resume --repeat {args.repeat} --defense {args.defense}"
               + (f" --round {args.round_name}" if args.round_name else "") + f" --models {' '.join(args.models)}")
-    errors = sum(1 for r in records if is_invalid(r) and not r.get("quota_exhausted"))
+    errors = sum(1 for r in records if is_invalid(r) and not r.get("quota_exhausted") and not is_model_error(r))
     if errors:
         print(f"{errors} run(s) failed before the agent acted; see errors above.")
         sys.exit(1)
