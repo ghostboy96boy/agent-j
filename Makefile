@@ -2,6 +2,7 @@
 
 REPEAT ?= 5
 ROUND ?= phase0-r1
+PILOT ?= phase0-pilot-gemini
 # lnget v1.1.0 requires Go >= 1.25 (the kit's docs still say 1.21/1.24).
 LNGET_VERSION ?= v1.1.0
 GO_VERSION ?= 1.25
@@ -44,7 +45,7 @@ report:
 	python3 -m bench.report
 
 summary:
-	python3 -m bench.report --summary --round $(ROUND)
+	python3 -m bench.report --summary --round $(ROUND) --pilot $(PILOT)
 
 models:
 	python3 -m bench.models

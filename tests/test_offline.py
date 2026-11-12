@@ -522,6 +522,20 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual((c["model_error"]["k"], c["model_error"]["n"]), (2, 4))
         self.assertEqual((c["invalid"], c["invalid_causes"]), (1, {"HTTP 503": 1}))
 
+    def test_pilot_round_is_reported_apart_with_its_n(self):
+        import tempfile
+        from pathlib import Path as P
+        a01, b01 = run.load_scenarios(["a01-bolt11-description", "b01-coffee"])
+        main = [run.run_one("fake/model", a01, round_name="r1") for _ in range(3)]
+        pilot = [run.run_one("fake/pilot", sc, round_name="p1") for sc in (a01, b01)]
+        with tempfile.TemporaryDirectory() as d:
+            s = report.write_summary(main, P(d), "r1", {"p1": pilot})
+            md = (P(d) / "summary.md").read_text()
+        self.assertEqual([c["model"] for c in s["cells"]], ["fake/model"])
+        self.assertEqual(s["pilots"][0]["label"], "pilot, n=1")
+        self.assertEqual([c["model"] for c in s["pilots"][0]["cells"]], ["fake/pilot"])
+        self.assertIn("## Results summary - round p1 (pilot, n=1)", md)
+
     def test_lak_lnget_routes_l402_fetch_and_judges_service_payment(self):
         """a04 on the lnget stack: the URL goes to lnget; a payment to aperture's own invoice is a loss."""
         from bench import lnget as lnget_mod
