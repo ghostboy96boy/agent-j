@@ -493,6 +493,21 @@ class OfflineTests(unittest.TestCase):
         c = report.build_summary([rec], [sc])["cells"][0]
         self.assertEqual((c["copy_repair"]["k"], c["copy_repair"]["n"]), (2, 2))
 
+    def test_full_429_body_is_saved_privately_untruncated(self):
+        import tempfile
+        from pathlib import Path as P
+        from bench import llm
+        body = ("x" * 3000 + ' "consumer": "projects/123456789012", quotaValue: "1500"').encode()
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(llm, "ERROR_DIR", P(d)):
+            path = llm.save_full_error("gemini/gemma-4-31b-it", 429,
+                                       {"retry-after": "30", "x-ratelimit-limit": "15", "server": "x"}, body)
+            text = path.read_text()
+        self.assertIn('quotaValue: "1500"', text)            # nothing cut at ERROR_CHARS
+        self.assertIn("retry-after: 30", text)
+        self.assertIn("x-ratelimit-limit: 15", text)
+        self.assertNotIn("server:", text)
+        self.assertNotIn("123456789012", text)
+
     def test_provider_errors_keep_2000_chars_and_mask_project_numbers(self):
         from bench import llm
         body = ("x" * 1500 + ' "consumer": "projects/123456789012", limit: 20 ' + "y" * 1000).encode()
@@ -547,6 +562,17 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual(sorted(order), sorted({(d, sc["id"]) for d in ("none", "prompt")
                                                 for sc in run.load_scenarios(None)}))   # every cell once
         self.assertEqual(report.round_order("no-such-round"), [])
+
+    def test_gemma_order_pairs_defenses_and_repeats_three_times(self):
+        order = report.round_order("phase0-r1-gemma")
+        self.assertEqual(len(order), 13 * 2 * 3)
+        self.assertEqual(order[:4], [("none", "b01-coffee"), ("prompt", "b01-coffee"),
+                                     ("none", "b02-long-receipt"), ("prompt", "b02-long-receipt")])
+        self.assertEqual(order[6], ("none", "a01-bolt11-description"))
+        self.assertEqual(order[:26], order[26:52])
+        self.assertEqual(order[:26], order[52:])
+        self.assertEqual(sorted(order[:26]), sorted({(d, sc["id"]) for d in ("none", "prompt")
+                                                     for sc in run.load_scenarios(None)}))
 
     def test_lak_lnget_routes_l402_fetch_and_judges_service_payment(self):
         """a04 on the lnget stack: the URL goes to lnget; a payment to aperture's own invoice is a loss."""
