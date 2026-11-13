@@ -583,6 +583,48 @@ class OfflineTests(unittest.TestCase):
         self.assertIn("HEAD abc1234; at round start def5678; harness commits during the round: 1111111.", md)
         self.assertIn("| b01-coffee | 1 | 0 |", md)                                     # n per cell, main round too
 
+    def test_quota_wait_follows_groq_retry_and_gemini_pacific_midnight(self):
+        import os
+        import tempfile
+        from datetime import datetime, timezone
+        from pathlib import Path as P
+        from bench import quota
+        groq_err = ("Daily quota reached for groq/openai/gpt-oss-120b: ... tokens per day (TPD): Limit 200000, "
+                    "Used 196847, Requested 6166. Please try again in 21m41.616s.")
+        gem_err = "Daily quota reached for gemini/gemini-3.6-flash: ... PerDay ..."
+        with tempfile.TemporaryDirectory() as d:
+            ok, why = quota.check("groq/openai/gpt-oss-120b", results=P(d))
+            self.assertTrue(ok)                                                    # nothing recorded
+            for name, model, err in (("run-1.json", "groq/openai/gpt-oss-120b", groq_err),
+                                     ("run-2.json", "gemini/gemini-3.6-flash", gem_err)):
+                path = P(d) / name
+                path.write_text(json.dumps({"records": [{"model": model, "agent_error": err}]}))
+                t = datetime(2026, 11, 12, 4, 30, tzinfo=timezone.utc).timestamp()
+                os.utime(path, (t, t))
+            at = lambda h, m: datetime(2026, 11, 12, h, m, tzinfo=timezone.utc)
+            self.assertFalse(quota.check("groq/openai/gpt-oss-120b", at(4, 50), P(d))[0])
+            self.assertTrue(quota.check("groq/openai/gpt-oss-120b", at(4, 53), P(d))[0])      # 04:30 + 21m42s
+            self.assertFalse(quota.check("gemini/gemini-3.6-flash", at(7, 59), P(d))[0])
+            self.assertTrue(quota.check("gemini/gemini-3.6-flash", at(8, 0), P(d))[0])        # 00:00 PST
+            self.assertTrue(quota.check("groq/qwen/qwen3.8-27b", at(4, 31), P(d))[0])         # other model
+
+    def test_status_counts_runs_without_results(self):
+        from collections import Counter
+        from datetime import datetime, timezone
+        from bench import status
+        c = Counter({("phase0-r1", "groq/openai/gpt-oss-120b", "none", "valid"): 39,
+                     ("phase0-r1", "groq/openai/gpt-oss-120b", "prompt", "valid"): 39,
+                     ("phase0-r1", "groq/qwen/qwen3.8-27b", "none", "valid"): 39,
+                     ("phase0-r1", "groq/qwen/qwen3.8-27b", "prompt", "valid"): 38,
+                     ("phase0-r1", "groq/qwen/qwen3.8-27b", "prompt", "model_error"): 2})
+        self.assertFalse(status.groq_done(c))
+        c[("phase0-r1", "groq/qwen/qwen3.8-27b", "prompt", "valid")] += 1
+        self.assertTrue(status.groq_done(c))
+        md = status.status_markdown(c, datetime(2026, 11, 13, 10, 0, tzinfo=timezone.utc))
+        self.assertIn("gpt-oss-120b 78/78, qwen3.8-27b 78/78", md)
+        self.assertIn("| phase0-r1 | groq/qwen/qwen3.8-27b | prompt | 39 | 2 | 0 |", md)
+        self.assertNotIn("sat", md.lower().replace("status", ""))                         # no results
+
     def test_gemma_order_pairs_defenses_and_repeats_three_times(self):
         order = report.round_order("phase0-r1-gemma")
         self.assertEqual(len(order), 13 * 2 * 3)
