@@ -29,6 +29,11 @@ HARNESS = "0.2"
 
 SCENARIO_DIR = ROOT / "scenarios"
 RESULTS_DIR = ROOT / "results"
+MODEL_ERROR_DIR = RESULTS_DIR / "model_errors"
+# A repetition whose model keeps emitting unparseable tool calls is tried at most this many
+# times; then it counts as executed with model_error and is not tried again (owner rule,
+# 2026-11-12). Quota and other invalid runs do not count toward this limit.
+MAX_MODEL_ERROR_ATTEMPTS = 3
 
 
 def load_scenarios(ids: list[str] | None) -> list[dict]:
@@ -171,6 +176,8 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
         record.update(tool_calls=partial.tool_calls if partial else [], final_text="",
                       agent_error=str(exc), aborted=True, quota_exhausted=isinstance(exc, DailyQuotaError))
         record["model_error"] = is_model_error(record)
+        if record["model_error"]:
+            record["model_error_file"] = save_model_error(record, exc)
     record["tokens"] = getattr(client, "tokens", 0)
     time.sleep(2)  # let the last HTLCs settle before reading the network
     service = {}
@@ -230,26 +237,79 @@ def is_model_error(record: dict) -> bool:
     return bool(record.get("aborted")) and "HTTP 400" in err and "tool_use_failed" in err
 
 
+def save_model_error(record: dict, exc: Exception) -> str:
+    """Keep the provider's raw response for a model error (Groq puts the model's unparseable
+    output in error.failed_generation) in results/model_errors/<utc>-<run_tag>.json. Only the
+    response body is stored: no request, no headers, no keys."""
+    MODEL_ERROR_DIR.mkdir(parents=True, exist_ok=True)
+    raw = getattr(exc, "raw", None) or b""
+    text = raw.decode(errors="replace")
+    try:
+        body = json.loads(text)
+    except ValueError:
+        body = text
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    path = MODEL_ERROR_DIR / f"{stamp}-{record['run_tag']}.json"
+    path.write_text(json.dumps({key: record.get(key) for key in
+                                ("model", "scenario", "defense", "stack", "round", "run_tag", "harness")}
+                               | {"http_status": getattr(exc, "status", None), "provider_response": body},
+                               indent=2, ensure_ascii=False) + "\n")
+    return str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+
+
 def is_invalid(record: dict) -> bool:
     """Run that cannot be scored: the model call failed or the run was cut short."""
     return bool(record.get("aborted")) or (bool(record.get("agent_error")) and not record.get("tool_calls"))
 
 
+def cell_progress(paths: list[Path], round_name: str | None = None) -> dict[tuple, dict]:
+    """(model, stack, defense, scenario) -> {"valid", "exhausted", "attempts"} replayed in run order.
+
+    Each repetition ends with a valid run, or after MAX_MODEL_ERROR_ATTEMPTS model errors
+    ("executed with model_error"). Other invalid runs (quota, outages) do not count as an attempt.
+    "attempts" lists the model errors of each repetition, in order. Files are read in name
+    (start time) order and records in file order, which is the order the runs were made.
+    """
+    records = [r for p in sorted(paths, key=lambda x: x.name) for r in json.loads(p.read_text())["records"]]
+    return progress_of(records, round_name)
+
+
+def progress_of(records: list[dict], round_name: str | None = None) -> dict[tuple, dict]:
+    """cell_progress over records already loaded, in run order."""
+    cells: dict[tuple, dict] = {}
+    for r in records:
+        if round_name is not None and r.get("round") != round_name:
+            continue
+        if harness_of(r) != HARNESS:
+            continue
+        key = (r["model"], r.get("stack", "generic"), r.get("defense", "none"), r["scenario"])
+        c = cells.setdefault(key, {"valid": 0, "exhausted": 0, "attempts": [0], "current": 0})
+        if is_model_error(r):
+            c["current"] += 1
+            c["attempts"][-1] = c["current"]
+            if c["current"] >= MAX_MODEL_ERROR_ATTEMPTS:
+                c["exhausted"] += 1
+                c["current"] = 0
+                c["attempts"].append(0)
+        elif not is_invalid(r):
+            c["valid"] += 1
+            c["current"] = 0
+            c["attempts"].append(0)
+    for c in cells.values():
+        del c["current"]
+        if c["attempts"][-1] == 0:
+            c["attempts"].pop()
+    return cells
+
+
 def done_counts(paths: list[Path], round_name: str | None = None) -> dict[tuple, int]:
-    """(model, stack, defense, scenario) -> number of valid runs already in these result files.
+    """(model, stack, defense, scenario) -> repetitions already executed in these result files:
+    valid runs plus repetitions closed after MAX_MODEL_ERROR_ATTEMPTS model errors.
 
     With round_name, only runs tagged with that round count, so a new round is not
     filled up with older runs of the same cell.
     """
-    counts: dict[tuple, int] = {}
-    for p in paths:
-        for r in json.loads(p.read_text())["records"]:
-            if round_name is not None and r.get("round") != round_name:
-                continue
-            if not is_invalid(r) and harness_of(r) == HARNESS:
-                key = (r["model"], r.get("stack", "generic"), r.get("defense", "none"), r["scenario"])
-                counts[key] = counts.get(key, 0) + 1
-    return counts
+    return {k: c["valid"] + c["exhausted"] for k, c in cell_progress(paths, round_name).items()}
 
 
 def main() -> None:

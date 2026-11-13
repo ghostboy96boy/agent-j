@@ -518,16 +518,26 @@ class OfflineTests(unittest.TestCase):
         self.assertIn("projects/<masked>", out)
 
     def test_tool_use_failed_is_a_model_error_not_an_invalid_run(self):
+        import tempfile
+        from pathlib import Path as P
+        raw = b'{"error":{"code":"tool_use_failed","failed_generation":"<call>pay_invoice(lnbcrt1...)"}}'
+
         class BadToolCall(ScriptedLLM):
             def chat(self, messages, tools):
                 if self.decoded:
-                    raise LLMError('HTTP 400 from fake/model: {"error":{"code":"tool_use_failed"}}', status=400)
+                    raise LLMError('HTTP 400 from fake/model: {"error":{"code":"tool_use_failed"}}',
+                                   status=400, raw=raw)
                 return super().chat(messages, tools)
 
         a01, b01 = run.load_scenarios(["a01-bolt11-description", "b01-coffee"])
-        with mock.patch.object(run, "ChatClient", BadToolCall):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(run, "ChatClient", BadToolCall), \
+                mock.patch.object(run, "MODEL_ERROR_DIR", P(d)):
             bad_attack, bad_control = run.run_one("fake/model", a01), run.run_one("fake/model", b01)
+            saved = json.loads(P(bad_attack["model_error_file"]).read_text())
         self.assertTrue(bad_attack["model_error"] and run.is_invalid(bad_attack))  # resume retries it
+        self.assertEqual(saved["provider_response"]["error"]["failed_generation"], "<call>pay_invoice(lnbcrt1...)")
+        self.assertEqual((saved["scenario"], saved["http_status"]), ("a01-bolt11-description", 400))
+        self.assertNotIn("Authorization", json.dumps(saved))
         ok_attack, ok_control = run.run_one("fake/model", a01), run.run_one("fake/model", b01)
         outage = {**ok_control, "aborted": True, "agent_error": "HTTP 503 from fake/model", "model_error": False}
         legacy = {k: v for k, v in bad_control.items() if k != "model_error"}  # recognized from the text
@@ -536,6 +546,36 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual(c["control_success"]["n"], 1)
         self.assertEqual((c["model_error"]["k"], c["model_error"]["n"]), (2, 4))
         self.assertEqual((c["invalid"], c["invalid_causes"]), (1, {"HTTP 503": 1}))
+
+    def test_repetition_closes_after_three_model_errors(self):
+        """Owner rule: at most 3 model-error attempts per repetition; quota cuts do not count."""
+        me = {"model": "m", "scenario": "a09", "round": "r1", "harness": run.HARNESS, "defense": "prompt",
+              "aborted": True, "model_error": True, "agent_error": "HTTP 400 tool_use_failed"}
+        ok = {**me, "aborted": False, "model_error": False, "agent_error": "", "tool_calls": [{}]}
+        quota = {**me, "model_error": False, "agent_error": "Daily quota reached for m: ..."}
+        key = ("m", "generic", "prompt", "a09")
+        # rep 1: me, me, ok -> valid; rep 2: me, quota, me, me -> closed with model_error; rep 3: me
+        seq = [me, me, ok, me, quota, me, me, me]
+        p = run.progress_of(seq, "r1")[key]
+        self.assertEqual((p["valid"], p["exhausted"], p["attempts"]), (1, 1, [2, 3, 1]))
+        import tempfile
+        from pathlib import Path as P
+        with tempfile.TemporaryDirectory() as d:
+            for i, r in enumerate(seq):
+                (P(d) / f"run-2026111{i}T000000Z.json").write_text(json.dumps({"records": [r]}))
+            self.assertEqual(run.done_counts(sorted(P(d).glob("run-*.json")), "r1")[key], 2)
+        from collections import Counter
+        from bench import status
+        recs = []
+        for m in status.GROQ:
+            recs += [{**ok, "model": m, "round": "phase0-r1", "scenario": f"s{i}"} for i in range(77)]
+            recs += [{**me, "model": m, "round": "phase0-r1", "scenario": "s77"}] * 3
+        c = Counter()
+        for r in recs:
+            c[("phase0-r1", r["model"], r["defense"], "model_error" if r["model_error"] else "valid")] += 1
+        self.assertTrue(status.groq_done(c, recs))
+        self.assertEqual(status.groq_done_text(c, recs), "Rodadas da Groq concluídas: gpt-oss 77 válidas + "
+                         "1 model_error / 78, qwen 77 válidas + 1 model_error / 78")
 
     def test_pilot_round_is_reported_apart_with_its_n(self):
         import tempfile

@@ -60,7 +60,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from .config import ROOT
-from .run import HARNESS, copy_failed, harness_of, is_model_error, load_scenarios
+from .run import HARNESS, copy_failed, harness_of, is_model_error, load_scenarios, progress_of
 
 CI_MIN_N = 30
 
@@ -287,8 +287,10 @@ def cell_counts(records: list[dict]) -> list[dict]:
     for r in records:
         kind = "model_error" if is_model_error(r) else ("invalid" if is_error(r) else "valid")
         per[(r["model"], r.get("defense", "none"), r["scenario"])][kind] += 1
+    closed = {(m, d, sc): p["exhausted"] for (m, _, d, sc), p in progress_of(records).items()}
     return [{"model": m, "defense": d, "scenario": sc, "valid": c["valid"],
-             "model_error": c["model_error"], "invalid": c["invalid"]}
+             "model_error": c["model_error"], "invalid": c["invalid"],
+             "closed_with_model_error": closed.get((m, d, sc), 0)}
             for (m, d, sc), c in sorted(per.items())]
 
 
@@ -350,6 +352,8 @@ def summary_markdown(s: dict, heading: str = "#") -> str:
                 for d in defenses:
                     c = by.get((m, d, sc))
                     extra = [f"{c[k]} {k.replace('_', ' ')}" for k in ("model_error", "invalid") if c and c[k]]
+                    if c and c.get("closed_with_model_error"):
+                        extra.append(f"{c['closed_with_model_error']} repetition(s) closed after 3 model errors")
                     row.append(f"{c['valid'] if c else 0}" + (f" ({', '.join(extra)})" if extra else ""))
             lines.append(f"| {sc} | " + " | ".join(row) + " |")
     return "\n".join(lines) + "\n"

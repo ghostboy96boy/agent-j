@@ -14,9 +14,10 @@ from .config import ROOT, resolve
 
 
 class LLMError(RuntimeError):
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None, raw: bytes | None = None):
         super().__init__(message)
         self.status = status
+        self.raw = raw  # full provider response body (no headers), kept as evidence for model errors
 
 
 class DailyQuotaError(LLMError):
@@ -123,7 +124,7 @@ class ChatClient:
                     time.sleep(min(wait, 60))
                     delay *= 2
                     continue
-                raise LLMError(f"HTTP {exc.code} from {self.model}: {detail}", status=exc.code) from exc
+                raise LLMError(f"HTTP {exc.code} from {self.model}: {detail}", status=exc.code, raw=raw) from exc
             except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as exc:
                 # A read timeout surfaces as a bare TimeoutError, not URLError. Timeouts get at
                 # most 2 retries: an overloaded provider otherwise stalls a run for ~15 minutes.

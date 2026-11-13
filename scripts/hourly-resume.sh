@@ -12,7 +12,8 @@
 #   model error), it updates results/STATUS.md (counts only), commits and pushes that file
 #   alone, and shows a Windows notification with the counts and the next attempt. A pass
 #   that ran nothing (quota not back) notifies nothing.
-# - When Groq has 78 valid runs per model it also shows the completion notification and
+# - When every repetition of both Groq models is executed (valid, or closed after 3
+#   model-error attempts) it also shows the completion notification and
 #   prints GROQ COMPLETE (once; marker in results/private/).
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -89,13 +90,7 @@ fi
 
 if [ ! -f "$MARKER" ] && python3 -m bench.status --groq-done > /dev/null; then
   push_status "Groq phase0-r1 complete"
-  text=$(python3 - <<'EOF'
-from bench.status import counts, valid_total
-c = counts()
-print(f"Rodadas da Groq concluídas: gpt-oss {valid_total(c, 'groq/openai/gpt-oss-120b')}/78, "
-      f"qwen {valid_total(c, 'groq/qwen/qwen3.8-27b')}/78")
-EOF
-)
+  text=$(python3 -m bench.status --groq-done-text | tail -1)
   scripts/notify.sh "Agent J" "$text" || true
   touch "$MARKER"
   echo "GROQ COMPLETE: $text"
