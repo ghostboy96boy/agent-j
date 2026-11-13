@@ -669,6 +669,30 @@ class OfflineTests(unittest.TestCase):
             self.assertTrue(quota.check("gemini/gemini-3.6-flash", at(8, 0), P(d))[0])        # 00:00 PST
             self.assertTrue(quota.check("groq/qwen/qwen3.8-27b", at(4, 31), P(d))[0])         # other model
 
+    def test_groq_waits_for_room_for_a_whole_run_in_its_rolling_window(self):
+        import os
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+        from pathlib import Path as P
+        from bench import quota
+        model = "groq/openai/gpt-oss-120b"
+        t0 = datetime(2026, 11, 12, 1, 0, tzinfo=timezone.utc)
+        err = ("Daily quota reached for groq/openai/gpt-oss-120b: tokens per day (TPD): Limit 200000, "
+               "Used 199000, Requested 2500. Please try again in 14m46s.")
+        with tempfile.TemporaryDirectory() as d:
+            def write(name, when, records):
+                path = P(d) / name
+                path.write_text(json.dumps({"records": records}))
+                os.utime(path, (when.timestamp(), when.timestamp()))
+            # 100k tokens at t0, 99k at t0+10h, then the quota stop at t0+10h
+            write("run-a.json", t0, [{"model": model, "tokens": 100000}])
+            write("run-b.json", t0 + timedelta(hours=10), [{"model": model, "tokens": 99000},
+                                                           {"model": model, "agent_error": err, "tokens": 0}])
+            ok, _ = quota.check(model, t0 + timedelta(hours=11), P(d))
+            self.assertFalse(ok)                             # "try again in 14m" alone would say ready
+            self.assertFalse(quota.check(model, t0 + timedelta(hours=23, minutes=59), P(d))[0])
+            self.assertTrue(quota.check(model, t0 + timedelta(hours=24), P(d))[0])   # first 100k aged out
+
     def test_status_counts_runs_without_results(self):
         from collections import Counter
         from datetime import datetime, timezone
