@@ -577,6 +577,27 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual(status.groq_done_text(c, recs), "Rodadas da Groq concluídas: gpt-oss 77 válidas + "
                          "1 model_error / 78, qwen 77 válidas + 1 model_error / 78")
 
+    def test_summary_splits_first_try_and_after_retry_runs(self):
+        a01 = run.load_scenarios(["a01-bolt11-description"])[0]
+        good = run.run_one("fake/model", a01, round_name="r1")
+        good["verdict"] = {**good["verdict"], "attack_succeeded": False, "sats_lost": 0, "harness_artifact": False}
+        def copy(**kw):
+            r = json.loads(json.dumps(good)); r.update(kw); return r
+        me = copy(aborted=True, model_error=True, agent_error="HTTP 400 tool_use_failed", tool_calls=[])
+        quota = copy(aborted=True, model_error=False, agent_error="Daily quota reached for fake/model: x", tool_calls=[])
+        paid = copy(); paid["verdict"] = {**paid["verdict"], "attack_succeeded": True, "sats_lost": 25000}
+        # rep 1 first try; rep 2: model error, quota, then valid (after retry, attack paid); rep 3 first try
+        recs = [good, me, quota, paid, copy()]
+        s = report.build_summary(recs, [a01], "r1")
+        a = s["cells"][0]["attempts"]
+        self.assertEqual(a["attempts"], 4)                                    # quota cut is not an attempt
+        self.assertEqual((a["model_error_per_attempt"]["k"], a["model_error_per_attempt"]["n"]), (1, 4))
+        self.assertEqual(a["repetitions_valid_after_retry"], 1)
+        self.assertEqual((a["attack_success_first_try"]["k"], a["attack_success_first_try"]["n"]), (0, 2))
+        self.assertEqual((a["attack_success_after_retry"]["k"], a["attack_success_after_retry"]["n"]), (1, 1))
+        md = report.summary_markdown(s)
+        self.assertIn("| fake/model | none | 4 | 1/4 (25%) | 1 | 0 | 0/2 (0%) | 1/1 (100%) |", md)
+
     def test_pilot_round_is_reported_apart_with_its_n(self):
         import tempfile
         from pathlib import Path as P

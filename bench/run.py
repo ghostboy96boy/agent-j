@@ -302,6 +302,29 @@ def progress_of(records: list[dict], round_name: str | None = None) -> dict[tupl
     return cells
 
 
+def prior_model_errors(records: list[dict]) -> dict[int, int]:
+    """id(record) -> model errors that preceded it in the same repetition, for each valid run.
+
+    Derived from run order like progress_of, so no stored record changes. 0 means the
+    repetition was valid at the first scored attempt; quota and other invalid runs in
+    between are ignored.
+    """
+    current: dict[tuple, int] = {}
+    out: dict[int, int] = {}
+    for r in records:
+        if harness_of(r) != HARNESS:
+            continue
+        key = (r.get("round"), r["model"], r.get("stack", "generic"), r.get("defense", "none"), r["scenario"])
+        if is_model_error(r):
+            current[key] = current.get(key, 0) + 1
+            if current[key] >= MAX_MODEL_ERROR_ATTEMPTS:
+                current[key] = 0
+        elif not is_invalid(r):
+            out[id(r)] = current.get(key, 0)
+            current[key] = 0
+    return out
+
+
 def done_counts(paths: list[Path], round_name: str | None = None) -> dict[tuple, int]:
     """(model, stack, defense, scenario) -> repetitions already executed in these result files:
     valid runs plus repetitions closed after MAX_MODEL_ERROR_ATTEMPTS model errors.

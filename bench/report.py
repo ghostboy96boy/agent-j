@@ -60,7 +60,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from .config import ROOT
-from .run import HARNESS, copy_failed, harness_of, is_model_error, load_scenarios, progress_of
+from .run import (HARNESS, copy_failed, harness_of, is_model_error, load_scenarios, prior_model_errors,
+                  progress_of)
 
 CI_MIN_N = 30
 
@@ -237,6 +238,10 @@ def cell(rs: list[dict], must_pay: dict[str, list]) -> dict:
 
 def build_summary(records: list[dict], scenarios: list[dict], round_name: str | None = None) -> dict:
     must_pay = {sc["id"]: sc.get("must_pay", []) for sc in scenarios}
+    prior = prior_model_errors(records)
+    closed = defaultdict(int)
+    for (m, st, d, _), p in progress_of(records).items():
+        closed[(m, st, d)] += p["exhausted"]
     cells: dict[tuple, list] = defaultdict(list)
     cats: dict[tuple, list] = defaultdict(list)
     for r in records:
@@ -250,13 +255,31 @@ def build_summary(records: list[dict], scenarios: list[dict], round_name: str | 
         "scenarios": sorted({r["scenario"] for r in records}),
         "policy_sha256": sorted({r["policy_sha256"] for r in records if r.get("policy_sha256")}),
         "lnd_versions": sorted({r["lnd_version"] for r in records if r.get("lnd_version")}),
-        "cells": [{"model": m, "stack": st, "defense": d, **cell(rs, must_pay)}
+        "cells": [{"model": m, "stack": st, "defense": d, **cell(rs, must_pay),
+                   "attempts": attempts(rs, must_pay, prior, closed[(m, st, d)])}
                   for (m, st, d), rs in sorted(cells.items())],
         "by_category": [{"model": m, "stack": st, "defense": d, "category": c,
                          "attack_success": cell(rs, must_pay)["attack_success"],
                          "sats_lost": cell(rs, must_pay)["sats_lost"], "invalid": cell(rs, must_pay)["invalid"]}
                         for (m, st, d, c), rs in sorted(cats.items())],
     }
+
+
+def attempts(rs: list[dict], must_pay: dict, prior: dict[int, int], closed: int) -> dict:
+    """Per-attempt view of a cell. An attempt is a valid run or a model error; quota and other
+    invalid runs are not attempts (they are retried without counting). Valid runs that came after
+    one or more model errors in the same repetition are split out, so their attack rate can be
+    compared with first-try runs (the retry policy may keep only the runs a model could finish)."""
+    errors = sum(1 for r in rs if is_error(r) and is_model_error(r))
+    valid = [r for r in rs if not is_error(r)]
+    first = [r for r in valid if prior.get(id(r), 0) == 0]
+    retried = [r for r in valid if prior.get(id(r), 0) > 0]
+    return {"attempts": len(valid) + errors,
+            "model_error_per_attempt": rate(errors, len(valid) + errors),
+            "repetitions_valid_after_retry": len(retried),
+            "repetitions_closed_with_model_error": closed,
+            "attack_success_first_try": cell(first, must_pay)["attack_success"],
+            "attack_success_after_retry": cell(retried, must_pay)["attack_success"]}
 
 
 def fmt_rate(x: dict) -> str:
@@ -325,6 +348,19 @@ def summary_markdown(s: dict, heading: str = "#") -> str:
                      f"| {c['harness_artifacts']} | {fmt_rate(c['model_error'])} | {c['invalid']}"
                      + (f" ({', '.join(f'{k}: {v}' for k, v in sorted(c['invalid_causes'].items()))})"
                         if c["invalid"] else "") + " |")
+    if any("attempts" in c for c in s["cells"]):
+        lines += ["", f"{heading}# Attempts{' (' + s['label'] + ')' if s.get('label') else ''}", "",
+                  "An attempt is a valid run or a model error. Each repetition gets at most 3 model-error attempts; "
+                  "quota-cut and other invalid runs are retried without counting. \"After retry\" = valid runs that "
+                  "followed a model error in the same repetition.", "",
+                  "| model | defense | attempts | model error per attempt | valid after retry "
+                  "| closed after 3 model errors | attack success, first try | attack success, after retry |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for c in s["cells"]:
+            a = c["attempts"]
+            lines.append(f"| {cell_name(c)} | {c['defense']} | {a['attempts']} | {fmt_rate(a['model_error_per_attempt'])} "
+                         f"| {a['repetitions_valid_after_retry']} | {a['repetitions_closed_with_model_error']} "
+                         f"| {fmt_rate(a['attack_success_first_try'])} | {fmt_rate(a['attack_success_after_retry'])} |")
     cols = [(c["model"], c["stack"], c["defense"]) for c in s["cells"]]
     if s["by_category"]:
         lines += ["", f"{heading}# Attack success by category{' (' + s['label'] + ')' if s.get('label') else ''}", "",
