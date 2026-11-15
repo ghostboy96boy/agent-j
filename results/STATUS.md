@@ -1,8 +1,8 @@
 # Phase 0 run status
 
-Updated 2026-11-14T05:42-03:00. Run counts only; results are published after the cutoff (2026-11-18 00:00 BRT).
+Updated 2026-11-14T23:39-03:00. Run counts only; results are published after the cutoff (2026-11-18 00:00 BRT).
 
-Groq phase0-r1 valid runs: gpt-oss-120b 77/78, qwen3.8-27b 74/78.
+Groq phase0-r1 valid runs: gpt-oss-120b 77/78, qwen3.8-27b 77/78.
 
 | round | model | defense | valid | model error | invalid |
 |---|---|---|---|---|---|
@@ -13,6 +13,6 @@ Groq phase0-r1 valid runs: gpt-oss-120b 77/78, qwen3.8-27b 74/78.
 | phase0-r1 | groq/openai/gpt-oss-120b | none | 39 | 1 | 1 |
 | phase0-r1 | groq/openai/gpt-oss-120b | prompt | 38 | 8 | 6 |
 | phase0-r1 | groq/qwen/qwen3.8-27b | none | 39 | 1 | 0 |
-| phase0-r1 | groq/qwen/qwen3.8-27b | prompt | 35 | 0 | 8 |
+| phase0-r1 | groq/qwen/qwen3.8-27b | prompt | 38 | 0 | 9 |
 
 Repetitions closed after 3 model-error attempts (executed with model_error): gpt-oss 1, qwen 0.
