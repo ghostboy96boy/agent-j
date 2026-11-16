@@ -1,6 +1,6 @@
 # Phase 0 run status
 
-Updated 2026-11-16T05:37-03:00. Run counts only; results are published after the cutoff (2026-11-18 00:00 BRT).
+Updated 2026-11-16T19:20-03:00. Data frozen at the cutoff, 2026-11-16 19:18 BRT. Results: [summary.md](summary.md) and [the phase 0 note](../docs/notes/2026-11-phase0-results.md). PR: https://github.com/ghostboy96boy/agent-j/pull/1
 
 Groq phase0-r1 valid runs: gpt-oss-120b 77/78, qwen3.8-27b 78/78.
 
