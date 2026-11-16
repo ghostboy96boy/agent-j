@@ -2,7 +2,7 @@
 
 Prints valid / model_error / invalid runs per round x model x defense. With --write it also writes
 results/STATUS.md (date, time and the same counts; no rates, no sats), which may be pushed while
-the rounds are still running.
+the rounds are still running. The cutoff shown comes from --cutoff VALUE or results/summary.json.
 """
 from __future__ import annotations
 
@@ -67,10 +67,23 @@ def table(c: Counter) -> str:
     return "\n".join(lines)
 
 
-def status_markdown(c: Counter, now: datetime) -> str:
+def cutoff_of(argv: list[str], summary: Path | None = None) -> str | None:
+    """The cutoff to report: --cutoff VALUE if given, else the one stored in results/summary.json."""
+    if "--cutoff" in argv:
+        return argv[argv.index("--cutoff") + 1]
+    summary = summary or ROOT / "results" / "summary.json"
+    try:
+        return json.loads(summary.read_text()).get("cutoff")
+    except (OSError, ValueError):
+        return None
+
+
+def status_markdown(c: Counter, now: datetime, cutoff: str | None = None) -> str:
     groq = ", ".join(f"{m.split('/')[-1]} {valid_total(c, m)}/{TARGET}" for m in GROQ)
-    return (f"# Phase 0 run status\n\nUpdated {now.isoformat(timespec='minutes')}. Run counts only; results "
-            f"are published after the cutoff (2026-11-18 00:00 BRT).\n\nGroq phase0-r1 valid runs: {groq}.\n\n"
+    when = (f"Data frozen at the cutoff ({cutoff}); results: [summary.md](summary.md)." if cutoff
+            else "Run counts only; results are published after the cutoff.")
+    return (f"# Phase 0 run status\n\nUpdated {now.isoformat(timespec='minutes')}. {when}\n\n"
+            f"Groq phase0-r1 valid runs: {groq}.\n\n"
             + table(c) + "\n\nRepetitions closed after 3 model-error attempts (executed with model_error): "
             + ", ".join(f"{SHORT[m]} {exhausted(load_records(), m)}" for m in GROQ) + ".\n")
 
@@ -79,7 +92,7 @@ def main() -> None:
     c = counts()
     print(table(c))
     if "--write" in sys.argv[1:]:
-        (ROOT / "results" / "STATUS.md").write_text(status_markdown(c, datetime.now().astimezone()))
+        (ROOT / "results" / "STATUS.md").write_text(status_markdown(c, datetime.now().astimezone(), cutoff_of(sys.argv[1:])))
         print("\nWrote results/STATUS.md")
     if "--groq-done-text" in sys.argv[1:]:
         print(groq_done_text(c, load_records()))

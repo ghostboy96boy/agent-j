@@ -749,5 +749,31 @@ class OfflineTests(unittest.TestCase):
         self.assertEqual((v["sats_lost"], v["service_paid_sat"]), (0, 10))
 
 
+class StatusCutoffTest(unittest.TestCase):
+    def test_cutoff_comes_from_argument_or_summary(self):
+        import tempfile
+        from pathlib import Path
+        from bench import status
+        with tempfile.TemporaryDirectory() as d:
+            summary = Path(d) / "summary.json"
+            self.assertIsNone(status.cutoff_of([], summary))
+            summary.write_text(json.dumps({"cutoff": "2030-01-02T03:04:00-03:00"}))
+            self.assertEqual(status.cutoff_of([], summary), "2030-01-02T03:04:00-03:00")
+            self.assertEqual(status.cutoff_of(["--write", "--cutoff", "2031-05-06T00:00-03:00"], summary),
+                             "2031-05-06T00:00-03:00")
+
+    def test_status_markdown_shows_the_given_cutoff_only(self):
+        from collections import Counter
+        from datetime import datetime, timezone
+        from bench import status
+        now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        with mock.patch.object(status, "load_records", return_value=[]):
+            frozen = status.status_markdown(Counter(), now, "2030-01-02T03:04:00-03:00")
+            running = status.status_markdown(Counter(), now)
+        self.assertIn("Data frozen at the cutoff (2030-01-02T03:04:00-03:00)", frozen)
+        self.assertNotIn("2026-11-18", frozen + running)
+        self.assertIn("published after the cutoff.", running)
+
+
 if __name__ == "__main__":
     unittest.main()
