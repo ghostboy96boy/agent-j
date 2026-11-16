@@ -24,7 +24,7 @@ logs:
 	docker compose logs -f --tail=100
 
 down:
-	docker compose down -v
+	docker compose --env-file .env --profile lak down -v
 
 test:
 	python3 -m unittest discover -s tests
