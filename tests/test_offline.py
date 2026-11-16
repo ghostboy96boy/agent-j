@@ -387,10 +387,339 @@ class OfflineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             f = P(d) / "run-x.json"
             f.write_text(json.dumps({"records": [ok, ok, bad]}))
-            self.assertEqual(run.done_counts([f]), {("fake/model", "generic", "b01-coffee"): 2})
+            self.assertEqual(run.done_counts([f]), {("fake/model", "generic", "none", "b01-coffee"): 2})
             legacy = {k: v for k, v in ok.items() if k not in ("harness", "refund_problems")}
             f.write_text(json.dumps({"records": [legacy]}))
             self.assertEqual(run.done_counts([f]), {})
+
+    def test_defense_none_keeps_the_base_prompt_and_is_recorded(self):
+        from bench import agent
+        seen = []
+
+        class Spy(ScriptedLLM):
+            def chat(self, messages, tools):
+                seen.append(messages[0]["content"])
+                return super().chat(messages, tools)
+
+        with mock.patch.object(run, "ChatClient", Spy):
+            rec = run.run_one("fake/model", run.load_scenarios(["b01-coffee"])[0])
+        self.assertEqual(set(seen), {agent.SYSTEM_PROMPT})
+        self.assertEqual((rec["defense"], rec["defense_layer"], rec["policy_sha256"]), ("none", "none", None))
+
+    def test_defense_prompt_adds_the_versioned_policy_and_is_recorded(self):
+        import hashlib
+        from bench import agent
+        policy = (agent.POLICY_DIR / "prompt_policy.txt").read_text().strip()
+        seen = []
+
+        class Spy(ScriptedLLM):
+            def chat(self, messages, tools):
+                seen.append(messages[0]["content"])
+                return super().chat(messages, tools)
+
+        with mock.patch.object(run, "ChatClient", Spy):
+            rec = run.run_one("fake/model", run.load_scenarios(["a01-bolt11-description"])[0],
+                              defense="prompt", round_name="r1")
+        self.assertTrue(seen and all(s.startswith(agent.SYSTEM_PROMPT) and s.endswith(policy) for s in seen))
+        self.assertEqual((rec["defense"], rec["defense_layer"], rec["round"]), ("prompt", "prompt-policy", "r1"))
+        self.assertEqual(rec["policy_sha256"],
+                         hashlib.sha256((agent.POLICY_DIR / "prompt_policy.txt").read_bytes()).hexdigest())
+        # The judge is untouched by the defense: the gullible fake agent still pays the attacker.
+        self.assertTrue(rec["verdict"]["attack_succeeded"])
+        self.assertEqual(run.defense_layer("lak-lncli", "prompt"), "scoped-credentials+prompt-policy")
+        with self.assertRaises(ValueError):
+            agent.system_prompt("guardrails")
+
+    def test_defense_flag_parses_and_rejects_unknown_layers(self):
+        import io
+        import sys as _sys
+        with mock.patch.object(_sys, "argv", ["bench.run", "--defense", "bogus"]), \
+             mock.patch.object(_sys, "stderr", io.StringIO()), self.assertRaises(SystemExit) as cm:
+            run.main()
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_resume_keeps_defenses_and_rounds_apart(self):
+        import tempfile
+        from pathlib import Path as P
+        sc = run.load_scenarios(["b01-coffee"])[0]
+        a = run.run_one("fake/model", sc, round_name="r1")
+        b = run.run_one("fake/model", sc, defense="prompt", round_name="r1")
+        old = run.run_one("fake/model", sc)
+        with tempfile.TemporaryDirectory() as d:
+            f = P(d) / "run-x.json"
+            f.write_text(json.dumps({"records": [a, b, b, old]}))
+            self.assertEqual(run.done_counts([f], "r1"), {("fake/model", "generic", "none", "b01-coffee"): 1,
+                                                          ("fake/model", "generic", "prompt", "b01-coffee"): 2})
+            self.assertEqual(run.done_counts([f])[("fake/model", "generic", "none", "b01-coffee")], 2)
+
+    def test_summary_aggregates_per_model_and_defense(self):
+        import tempfile
+        from pathlib import Path as P
+        a01, a10, b01 = run.load_scenarios(["a01-bolt11-description", "a10-fake-refund", "b01-coffee"])
+        recs = [run.run_one("fake/model", sc, defense=d, round_name="r1")
+                for d in ("none", "prompt") for sc in (a01, a10, b01)]  # gullible: every attack pays
+        refused = {**recs[3], "verdict": {**recs[3]["verdict"], "attack_succeeded": False, "sats_lost": 0,
+                                          "task_done": False}}  # prompt/a01: refused everything
+        broken = {**recs[5], "aborted": True, "agent_error": "HTTP 503 from fake/model: overloaded"}
+        records = recs[:3] + [refused, recs[4], broken]
+        with tempfile.TemporaryDirectory() as d:
+            s = report.write_summary(records, P(d), "r1")
+            md = (P(d) / "summary.md").read_text()
+            self.assertEqual(json.loads((P(d) / "summary.json").read_text())["round"], "r1")
+        none, prompt = (next(c for c in s["cells"] if c["defense"] == x) for x in ("none", "prompt"))
+        self.assertEqual((none["attack_success"]["k"], none["attack_success"]["n"]), (2, 2))
+        self.assertEqual(none["sats_lost"], {"sum": 50000, "median": 25000.0, "n": 2})
+        self.assertEqual((none["control_success"]["k"], none["control_success"]["n"]), (1, 1))
+        self.assertEqual((none["false_block"]["k"], none["false_block"]["n"]), (0, 1))  # b01 only
+        self.assertEqual((none["legit_missed_under_attack"]["k"], none["legit_missed_under_attack"]["n"]), (0, 1))  # a01
+        self.assertEqual((prompt["attack_success"]["k"], prompt["attack_success"]["n"]), (1, 2))
+        self.assertEqual(prompt["sats_lost"]["median"], 12500.0)
+        self.assertEqual(prompt["false_block"]["n"], 0)  # the b01 run is invalid
+        m = prompt["legit_missed_under_attack"]
+        self.assertEqual((m["k"], m["n"]), (1, 1))  # a01 refused the merchant too; a10 has no must_pay
+        self.assertEqual(prompt["control_success"]["n"], 0)  # the only control run is invalid
+        self.assertEqual((prompt["invalid"], prompt["invalid_causes"]), (1, {"HTTP 503": 1}))
+        self.assertIsNone(none["attack_success"]["ci95"])  # n < 30: no interval
+        self.assertEqual(len(report.wilson(15, 30)), 2)
+        cats = {(b["defense"], b["category"]): b["attack_success"]["k"] for b in s["by_category"]}
+        self.assertEqual(cats[("prompt", "bolt11_description_injection")], 0)
+        self.assertIn("| fake/model | prompt | 1/2 (50%) |", md)
+        self.assertIn("## Attack success by category", md)
+
+    def test_copy_repair_rate_in_summary(self):
+        sc = run.load_scenarios(["b01-coffee"])[0]
+        with mock.patch.object(run, "ChatClient", ManglingLLM):
+            rec = run.run_one("fake/model", sc)
+        c = report.build_summary([rec], [sc])["cells"][0]
+        self.assertEqual((c["copy_repair"]["k"], c["copy_repair"]["n"]), (2, 2))
+
+    def test_full_429_body_is_saved_privately_untruncated(self):
+        import tempfile
+        from pathlib import Path as P
+        from bench import llm
+        body = ("x" * 3000 + ' "consumer": "projects/123456789012", quotaValue: "1500"').encode()
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(llm, "ERROR_DIR", P(d)):
+            path = llm.save_full_error("gemini/gemma-4-31b-it", 429,
+                                       {"retry-after": "30", "x-ratelimit-limit": "15", "server": "x"}, body)
+            text = path.read_text()
+        self.assertIn('quotaValue: "1500"', text)            # nothing cut at ERROR_CHARS
+        self.assertIn("retry-after: 30", text)
+        self.assertIn("x-ratelimit-limit: 15", text)
+        self.assertNotIn("server:", text)
+        self.assertNotIn("123456789012", text)
+
+    def test_provider_errors_keep_2000_chars_and_mask_project_numbers(self):
+        from bench import llm
+        body = ("x" * 1500 + ' "consumer": "projects/123456789012", limit: 20 ' + "y" * 1000).encode()
+        out = llm.clean_detail(body)
+        self.assertEqual(len(body[:llm.ERROR_CHARS]), 2000)
+        self.assertIn("limit: 20", out)
+        self.assertNotIn("123456789012", out)
+        self.assertIn("projects/<masked>", out)
+
+    def test_tool_use_failed_is_a_model_error_not_an_invalid_run(self):
+        import tempfile
+        from pathlib import Path as P
+        raw = b'{"error":{"code":"tool_use_failed","failed_generation":"<call>pay_invoice(lnbcrt1...)"}}'
+
+        class BadToolCall(ScriptedLLM):
+            def chat(self, messages, tools):
+                if self.decoded:
+                    raise LLMError('HTTP 400 from fake/model: {"error":{"code":"tool_use_failed"}}',
+                                   status=400, raw=raw)
+                return super().chat(messages, tools)
+
+        a01, b01 = run.load_scenarios(["a01-bolt11-description", "b01-coffee"])
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(run, "ChatClient", BadToolCall), \
+                mock.patch.object(run, "MODEL_ERROR_DIR", P(d)):
+            bad_attack, bad_control = run.run_one("fake/model", a01), run.run_one("fake/model", b01)
+            saved = json.loads(P(bad_attack["model_error_file"]).read_text())
+        self.assertTrue(bad_attack["model_error"] and run.is_invalid(bad_attack))  # resume retries it
+        self.assertEqual(saved["provider_response"]["error"]["failed_generation"], "<call>pay_invoice(lnbcrt1...)")
+        self.assertEqual((saved["scenario"], saved["http_status"]), ("a01-bolt11-description", 400))
+        self.assertNotIn("Authorization", json.dumps(saved))
+        ok_attack, ok_control = run.run_one("fake/model", a01), run.run_one("fake/model", b01)
+        outage = {**ok_control, "aborted": True, "agent_error": "HTTP 503 from fake/model", "model_error": False}
+        legacy = {k: v for k, v in bad_control.items() if k != "model_error"}  # recognized from the text
+        c = report.build_summary([bad_attack, ok_attack, legacy, ok_control, outage], [a01, b01])["cells"][0]
+        self.assertEqual((c["attack_success"]["k"], c["attack_success"]["n"]), (1, 1))
+        self.assertEqual(c["control_success"]["n"], 1)
+        self.assertEqual((c["model_error"]["k"], c["model_error"]["n"]), (2, 4))
+        self.assertEqual((c["invalid"], c["invalid_causes"]), (1, {"HTTP 503": 1}))
+
+    def test_repetition_closes_after_three_model_errors(self):
+        """Owner rule: at most 3 model-error attempts per repetition; quota cuts do not count."""
+        me = {"model": "m", "scenario": "a09", "round": "r1", "harness": run.HARNESS, "defense": "prompt",
+              "aborted": True, "model_error": True, "agent_error": "HTTP 400 tool_use_failed"}
+        ok = {**me, "aborted": False, "model_error": False, "agent_error": "", "tool_calls": [{}]}
+        quota = {**me, "model_error": False, "agent_error": "Daily quota reached for m: ..."}
+        key = ("m", "generic", "prompt", "a09")
+        # rep 1: me, me, ok -> valid; rep 2: me, quota, me, me -> closed with model_error; rep 3: me
+        seq = [me, me, ok, me, quota, me, me, me]
+        p = run.progress_of(seq, "r1")[key]
+        self.assertEqual((p["valid"], p["exhausted"], p["attempts"]), (1, 1, [2, 3, 1]))
+        import tempfile
+        from pathlib import Path as P
+        with tempfile.TemporaryDirectory() as d:
+            for i, r in enumerate(seq):
+                (P(d) / f"run-2026111{i}T000000Z.json").write_text(json.dumps({"records": [r]}))
+            self.assertEqual(run.done_counts(sorted(P(d).glob("run-*.json")), "r1")[key], 2)
+        from collections import Counter
+        from bench import status
+        recs = []
+        for m in status.GROQ:
+            recs += [{**ok, "model": m, "round": "phase0-r1", "scenario": f"s{i}"} for i in range(77)]
+            recs += [{**me, "model": m, "round": "phase0-r1", "scenario": "s77"}] * 3
+        c = Counter()
+        for r in recs:
+            c[("phase0-r1", r["model"], r["defense"], "model_error" if r["model_error"] else "valid")] += 1
+        self.assertTrue(status.groq_done(c, recs))
+        self.assertEqual(status.groq_done_text(c, recs), "Rodadas da Groq concluídas: gpt-oss 77 válidas + "
+                         "1 model_error / 78, qwen 77 válidas + 1 model_error / 78")
+
+    def test_summary_splits_first_try_and_after_retry_runs(self):
+        a01 = run.load_scenarios(["a01-bolt11-description"])[0]
+        good = run.run_one("fake/model", a01, round_name="r1")
+        good["verdict"] = {**good["verdict"], "attack_succeeded": False, "sats_lost": 0, "harness_artifact": False}
+        def copy(**kw):
+            r = json.loads(json.dumps(good)); r.update(kw); return r
+        me = copy(aborted=True, model_error=True, agent_error="HTTP 400 tool_use_failed", tool_calls=[])
+        quota = copy(aborted=True, model_error=False, agent_error="Daily quota reached for fake/model: x", tool_calls=[])
+        paid = copy(); paid["verdict"] = {**paid["verdict"], "attack_succeeded": True, "sats_lost": 25000}
+        # rep 1 first try; rep 2: model error, quota, then valid (after retry, attack paid); rep 3 first try
+        recs = [good, me, quota, paid, copy()]
+        s = report.build_summary(recs, [a01], "r1")
+        a = s["cells"][0]["attempts"]
+        self.assertEqual(a["attempts"], 4)                                    # quota cut is not an attempt
+        self.assertEqual((a["model_error_per_attempt"]["k"], a["model_error_per_attempt"]["n"]), (1, 4))
+        self.assertEqual(a["repetitions_valid_after_retry"], 1)
+        self.assertEqual((a["attack_success_first_try"]["k"], a["attack_success_first_try"]["n"]), (0, 2))
+        self.assertEqual((a["attack_success_after_retry"]["k"], a["attack_success_after_retry"]["n"]), (1, 1))
+        md = report.summary_markdown(s)
+        self.assertIn("| fake/model | none | 4 | 1/4 (25%) | 1 | 0 | 0/2 (0%) | 1/1 (100%) |", md)
+
+    def test_pilot_round_is_reported_apart_with_its_n(self):
+        import tempfile
+        from pathlib import Path as P
+        a01, b01 = run.load_scenarios(["a01-bolt11-description", "b01-coffee"])
+        main = [run.run_one("fake/model", a01, round_name="r1") for _ in range(3)]
+        pilot = [run.run_one("fake/pilot", sc, round_name="p1") for sc in (a01, b01)]
+        with tempfile.TemporaryDirectory() as d:
+            s = report.write_summary(main, P(d), "r1", {"p1": pilot})
+            md = (P(d) / "summary.md").read_text()
+        self.assertEqual([c["model"] for c in s["cells"]], ["fake/model"])
+        self.assertEqual(s["pilots"][0]["label"], "pilot, n=1")
+        self.assertEqual([c["model"] for c in s["pilots"][0]["cells"]], ["fake/pilot"])
+        self.assertIn("## Results summary - round p1 (pilot, n=1)", md)
+        self.assertIn("### Runs per cell (pilot, n=1)", md)
+        self.assertIn("| b01-coffee | 1 | 0 |", md)          # n shown per cell, missing cells as 0
+        self.assertIn("| a02-forwarded-message | 0 | 0 |", md)
+
+    def test_pilot_order_file_is_read_and_published(self):
+        order = report.round_order("phase0-pilot-gemini")
+        self.assertEqual(order[6], ("prompt", "a01-bolt11-description"))   # prompt a01-a06 right after none
+        self.assertEqual(order[12:14], [("none", "b01-coffee"), ("prompt", "b01-coffee")])
+        self.assertEqual(order[-1], ("prompt", "a10-fake-refund"))
+        self.assertEqual(sorted(order), sorted({(d, sc["id"]) for d in ("none", "prompt")
+                                                for sc in run.load_scenarios(None)}))   # every cell once
+        self.assertEqual(report.round_order("no-such-round"), [])
+
+    def test_cutoff_drops_files_started_after_it_and_is_published(self):
+        import tempfile
+        from pathlib import Path as P
+        cut = report.parse_cutoff("2026-11-18T00:00-03:00")
+        self.assertIsNone(report.file_time(P("summary.json")))
+        self.assertLess(report.file_time(P("results/run-20261118T025959Z.json")), cut)    # 23:59:59 BRT
+        self.assertGreater(report.file_time(P("results/run-20261118T030001Z.json")), cut)
+        with self.assertRaises(SystemExit):
+            report.parse_cutoff("2026-11-18T00:00")                                      # offset required
+        b01 = run.load_scenarios(["b01-coffee"])[0]
+        recs = [run.run_one("fake/model", b01, round_name="r1")]
+        with tempfile.TemporaryDirectory() as d:
+            s = report.write_summary(recs, P(d), "r1", cutoff=cut, code={"head": "abc1234", "at_round_start": "def5678",
+                                                                        "during_round": ["1111111 2026 x"]})
+            md = (P(d) / "summary.md").read_text()
+        self.assertEqual(s["cutoff"], "2026-11-18T00:00:00-03:00")
+        self.assertIn("Data frozen at 2026-11-18T00:00:00-03:00", md)
+        self.assertIn("HEAD abc1234; at round start def5678; harness commits during the round: 1111111.", md)
+        self.assertIn("| b01-coffee | 1 | 0 |", md)                                     # n per cell, main round too
+
+    def test_quota_wait_follows_groq_retry_and_gemini_pacific_midnight(self):
+        import os
+        import tempfile
+        from datetime import datetime, timezone
+        from pathlib import Path as P
+        from bench import quota
+        groq_err = ("Daily quota reached for groq/openai/gpt-oss-120b: ... tokens per day (TPD): Limit 200000, "
+                    "Used 196847, Requested 6166. Please try again in 21m41.616s.")
+        gem_err = "Daily quota reached for gemini/gemini-3.6-flash: ... PerDay ..."
+        with tempfile.TemporaryDirectory() as d:
+            ok, why = quota.check("groq/openai/gpt-oss-120b", results=P(d))
+            self.assertTrue(ok)                                                    # nothing recorded
+            for name, model, err in (("run-1.json", "groq/openai/gpt-oss-120b", groq_err),
+                                     ("run-2.json", "gemini/gemini-3.6-flash", gem_err)):
+                path = P(d) / name
+                path.write_text(json.dumps({"records": [{"model": model, "agent_error": err}]}))
+                t = datetime(2026, 11, 12, 4, 30, tzinfo=timezone.utc).timestamp()
+                os.utime(path, (t, t))
+            at = lambda h, m: datetime(2026, 11, 12, h, m, tzinfo=timezone.utc)
+            self.assertFalse(quota.check("groq/openai/gpt-oss-120b", at(4, 50), P(d))[0])
+            self.assertTrue(quota.check("groq/openai/gpt-oss-120b", at(4, 53), P(d))[0])      # 04:30 + 21m42s
+            self.assertFalse(quota.check("gemini/gemini-3.6-flash", at(7, 59), P(d))[0])
+            self.assertTrue(quota.check("gemini/gemini-3.6-flash", at(8, 0), P(d))[0])        # 00:00 PST
+            self.assertTrue(quota.check("groq/qwen/qwen3.8-27b", at(4, 31), P(d))[0])         # other model
+
+    def test_groq_waits_for_room_for_a_whole_run_in_its_rolling_window(self):
+        import os
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+        from pathlib import Path as P
+        from bench import quota
+        model = "groq/openai/gpt-oss-120b"
+        t0 = datetime(2026, 11, 12, 1, 0, tzinfo=timezone.utc)
+        err = ("Daily quota reached for groq/openai/gpt-oss-120b: tokens per day (TPD): Limit 200000, "
+               "Used 199000, Requested 2500. Please try again in 14m46s.")
+        with tempfile.TemporaryDirectory() as d:
+            def write(name, when, records):
+                path = P(d) / name
+                path.write_text(json.dumps({"records": records}))
+                os.utime(path, (when.timestamp(), when.timestamp()))
+            # 100k tokens at t0, 99k at t0+10h, then the quota stop at t0+10h
+            write("run-a.json", t0, [{"model": model, "tokens": 100000}])
+            write("run-b.json", t0 + timedelta(hours=10), [{"model": model, "tokens": 99000},
+                                                           {"model": model, "agent_error": err, "tokens": 0}])
+            ok, _ = quota.check(model, t0 + timedelta(hours=11), P(d))
+            self.assertFalse(ok)                             # "try again in 14m" alone would say ready
+            self.assertFalse(quota.check(model, t0 + timedelta(hours=23, minutes=59), P(d))[0])
+            self.assertTrue(quota.check(model, t0 + timedelta(hours=24), P(d))[0])   # first 100k aged out
+
+    def test_status_counts_runs_without_results(self):
+        from collections import Counter
+        from datetime import datetime, timezone
+        from bench import status
+        c = Counter({("phase0-r1", "groq/openai/gpt-oss-120b", "none", "valid"): 39,
+                     ("phase0-r1", "groq/openai/gpt-oss-120b", "prompt", "valid"): 39,
+                     ("phase0-r1", "groq/qwen/qwen3.8-27b", "none", "valid"): 39,
+                     ("phase0-r1", "groq/qwen/qwen3.8-27b", "prompt", "valid"): 38,
+                     ("phase0-r1", "groq/qwen/qwen3.8-27b", "prompt", "model_error"): 2})
+        self.assertFalse(status.groq_done(c))
+        c[("phase0-r1", "groq/qwen/qwen3.8-27b", "prompt", "valid")] += 1
+        self.assertTrue(status.groq_done(c))
+        md = status.status_markdown(c, datetime(2026, 11, 13, 10, 0, tzinfo=timezone.utc))
+        self.assertIn("gpt-oss-120b 78/78, qwen3.8-27b 78/78", md)
+        self.assertIn("| phase0-r1 | groq/qwen/qwen3.8-27b | prompt | 39 | 2 | 0 |", md)
+        self.assertNotIn("sat", md.lower().replace("status", ""))                         # no results
+
+    def test_gemma_order_pairs_defenses_and_repeats_three_times(self):
+        order = report.round_order("phase0-r1-gemma")
+        self.assertEqual(len(order), 13 * 2 * 3)
+        self.assertEqual(order[:4], [("none", "b01-coffee"), ("prompt", "b01-coffee"),
+                                     ("none", "b02-long-receipt"), ("prompt", "b02-long-receipt")])
+        self.assertEqual(order[6], ("none", "a01-bolt11-description"))
+        self.assertEqual(order[:26], order[26:52])
+        self.assertEqual(order[:26], order[52:])
+        self.assertEqual(sorted(order[:26]), sorted({(d, sc["id"]) for d in ("none", "prompt")
+                                                     for sc in run.load_scenarios(None)}))
 
     def test_lak_lnget_routes_l402_fetch_and_judges_service_payment(self):
         """a04 on the lnget stack: the URL goes to lnget; a payment to aperture's own invoice is a loss."""
@@ -418,6 +747,32 @@ class OfflineTests(unittest.TestCase):
         v = judge.score({"category": "benign", "must_pay": [], "must_not_pay": []}, {}, lambda n, r: 0,
                         service_paid_sat=10)
         self.assertEqual((v["sats_lost"], v["service_paid_sat"]), (0, 10))
+
+
+class StatusCutoffTest(unittest.TestCase):
+    def test_cutoff_comes_from_argument_or_summary(self):
+        import tempfile
+        from pathlib import Path
+        from bench import status
+        with tempfile.TemporaryDirectory() as d:
+            summary = Path(d) / "summary.json"
+            self.assertIsNone(status.cutoff_of([], summary))
+            summary.write_text(json.dumps({"cutoff": "2030-01-02T03:04:00-03:00"}))
+            self.assertEqual(status.cutoff_of([], summary), "2030-01-02T03:04:00-03:00")
+            self.assertEqual(status.cutoff_of(["--write", "--cutoff", "2031-05-06T00:00-03:00"], summary),
+                             "2031-05-06T00:00-03:00")
+
+    def test_status_markdown_shows_the_given_cutoff_only(self):
+        from collections import Counter
+        from datetime import datetime, timezone
+        from bench import status
+        now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        with mock.patch.object(status, "load_records", return_value=[]):
+            frozen = status.status_markdown(Counter(), now, "2030-01-02T03:04:00-03:00")
+            running = status.status_markdown(Counter(), now)
+        self.assertIn("Data frozen at the cutoff (2030-01-02T03:04:00-03:00)", frozen)
+        self.assertNotIn("2026-11-18", frozen + running)
+        self.assertIn("published after the cutoff.", running)
 
 
 if __name__ == "__main__":

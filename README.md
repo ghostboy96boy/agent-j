@@ -4,7 +4,7 @@
 
 Agent J is a crash-test lab for AI agents that move bitcoin. It gives agents real Lightning wallets on a private regtest network, attacks them on purpose, and measures two things: which models get tricked into paying, and which controls actually stop the money from leaving.
 
-> Status: early development (October 2026). The regtest lab runs with one command; agents, attack scenarios and the judge are next. See the [roadmap](docs/ROADMAP.md).
+> Status: phase 0 done (November 2026). The regtest lab, a reference agent, 13 scenarios and the settlement judge run end to end; the first live round is written up in [Phase 0 results](docs/notes/2026-11-phase0-results.md). See the [roadmap](docs/ROADMAP.md).
 
 ## Why this exists
 
@@ -52,6 +52,10 @@ make down      # stops everything and deletes the regtest data
 ```
 
 Everything runs on regtest. No real bitcoin is involved at any point.
+
+Phase 0 models (free tiers, pinned in `bench/config.py`): `groq/openai/gpt-oss-120b`,
+`groq/qwen/qwen3.8-27b` and `gemini/gemini-3.6-flash`. `gemini/gemini-2.5-flash` returned HTTP 404
+on 2026-11-12 and was replaced by `gemini-3.6-flash`.
 
 ## Repository layout
 

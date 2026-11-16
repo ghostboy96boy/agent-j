@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import judge, lnnodes
-from .agent import LAK_PROFILE, STACKS, make_tool_runner, run_agent
+from .agent import DEFENSES, LAK_PROFILE, STACKS, make_tool_runner, policy_sha256, run_agent
 from .config import DEFAULT_MODELS, ROOT, load_env
 from .llm import ChatClient, DailyQuotaError, LLMError
 
@@ -29,6 +29,11 @@ HARNESS = "0.2"
 
 SCENARIO_DIR = ROOT / "scenarios"
 RESULTS_DIR = ROOT / "results"
+MODEL_ERROR_DIR = RESULTS_DIR / "model_errors"
+# A repetition whose model keeps emitting unparseable tool calls is tried at most this many
+# times; then it counts as executed with model_error and is not tried again (owner rule,
+# 2026-11-12). Quota and other invalid runs do not count toward this limit.
+MAX_MODEL_ERROR_ATTEMPTS = 3
 
 
 def load_scenarios(ids: list[str] | None) -> list[dict]:
@@ -123,7 +128,16 @@ def refund(issued: dict, paid: dict) -> list[str]:
     return problems
 
 
-def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "generic") -> dict:
+def defense_layer(stack: str, defense: str) -> str:
+    """Defense layers a run had: the stack's, plus the prompt policy if enabled."""
+    layers = [STACKS[stack][0]] if STACKS[stack][0] != "none" else []
+    if defense == "prompt":
+        layers.append("prompt-policy")
+    return "+".join(layers) or "none"
+
+
+def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "generic",
+            defense: str = "none", round_name: str | None = None) -> dict:
     run_tag = uuid.uuid4().hex[:8]
     issued, bolt11 = issue_invoices(scenario, run_tag)
     task = render(scenario["task"], bolt11, scenario)
@@ -138,7 +152,10 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
         "harness": HARNESS,
         "lnd_version": LAB["lnd_version"],
         "stack": stack,
-        "defense_layer": STACKS[stack][0],
+        "defense": defense,
+        "defense_layer": defense_layer(stack, defense),
+        "policy_sha256": policy_sha256(defense),
+        "round": round_name,
         "invoices": {name: {**issued[name], "bolt11": bolt11[name]} for name in issued},
     }
     client = None
@@ -146,7 +163,7 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
         runner = make_tool_runner(list(bolt11.values()), documents, stack,
                                   l402=scenario.get("l402"), lnget_creds=LNGET_CREDS.get(LAK_PROFILE.get(stack, "")))
         client = ChatClient(model)
-        transcript = run_agent(client, task, tool_runner=runner)
+        transcript = run_agent(client, task, tool_runner=runner, defense=defense)
         record.update(
             tool_calls=transcript.tool_calls,
             final_text=transcript.final_text,
@@ -158,6 +175,9 @@ def run_one(model: str, scenario: dict, do_refund: bool = True, stack: str = "ge
         partial = getattr(exc, "transcript", None)
         record.update(tool_calls=partial.tool_calls if partial else [], final_text="",
                       agent_error=str(exc), aborted=True, quota_exhausted=isinstance(exc, DailyQuotaError))
+        record["model_error"] = is_model_error(record)
+        if record["model_error"]:
+            record["model_error_file"] = save_model_error(record, exc)
     record["tokens"] = getattr(client, "tokens", 0)
     time.sleep(2)  # let the last HTLCs settle before reading the network
     service = {}
@@ -205,20 +225,114 @@ def other_bench_running() -> bool:
     return any(int(pid) != os.getpid() for pid in out if pid.isdigit())
 
 
+def is_model_error(record: dict) -> bool:
+    """The model itself produced a tool call the provider could not parse (HTTP 400 tool_use_failed).
+
+    That is a model failure, not an outage, so it is reported apart from invalid runs. Older
+    records without the flag are recognized from the stored error text.
+    """
+    if "model_error" in record:
+        return bool(record["model_error"])
+    err = str(record.get("agent_error") or "")
+    return bool(record.get("aborted")) and "HTTP 400" in err and "tool_use_failed" in err
+
+
+def save_model_error(record: dict, exc: Exception) -> str:
+    """Keep the provider's raw response for a model error (Groq puts the model's unparseable
+    output in error.failed_generation) in results/model_errors/<utc>-<run_tag>.json. Only the
+    response body is stored: no request, no headers, no keys."""
+    MODEL_ERROR_DIR.mkdir(parents=True, exist_ok=True)
+    raw = getattr(exc, "raw", None) or b""
+    text = raw.decode(errors="replace")
+    try:
+        body = json.loads(text)
+    except ValueError:
+        body = text
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    path = MODEL_ERROR_DIR / f"{stamp}-{record['run_tag']}.json"
+    path.write_text(json.dumps({key: record.get(key) for key in
+                                ("model", "scenario", "defense", "stack", "round", "run_tag", "harness")}
+                               | {"http_status": getattr(exc, "status", None), "provider_response": body},
+                               indent=2, ensure_ascii=False) + "\n")
+    return str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+
+
 def is_invalid(record: dict) -> bool:
     """Run that cannot be scored: the model call failed or the run was cut short."""
     return bool(record.get("aborted")) or (bool(record.get("agent_error")) and not record.get("tool_calls"))
 
 
-def done_counts(paths: list[Path]) -> dict[tuple, int]:
-    """(model, stack, scenario) -> number of valid runs already in these result files."""
-    counts: dict[tuple, int] = {}
-    for p in paths:
-        for r in json.loads(p.read_text())["records"]:
-            if not is_invalid(r) and harness_of(r) == HARNESS:
-                key = (r["model"], r.get("stack", "generic"), r["scenario"])
-                counts[key] = counts.get(key, 0) + 1
-    return counts
+def cell_progress(paths: list[Path], round_name: str | None = None) -> dict[tuple, dict]:
+    """(model, stack, defense, scenario) -> {"valid", "exhausted", "attempts"} replayed in run order.
+
+    Each repetition ends with a valid run, or after MAX_MODEL_ERROR_ATTEMPTS model errors
+    ("executed with model_error"). Other invalid runs (quota, outages) do not count as an attempt.
+    "attempts" lists the model errors of each repetition, in order. Files are read in name
+    (start time) order and records in file order, which is the order the runs were made.
+    """
+    records = [r for p in sorted(paths, key=lambda x: x.name) for r in json.loads(p.read_text())["records"]]
+    return progress_of(records, round_name)
+
+
+def progress_of(records: list[dict], round_name: str | None = None) -> dict[tuple, dict]:
+    """cell_progress over records already loaded, in run order."""
+    cells: dict[tuple, dict] = {}
+    for r in records:
+        if round_name is not None and r.get("round") != round_name:
+            continue
+        if harness_of(r) != HARNESS:
+            continue
+        key = (r["model"], r.get("stack", "generic"), r.get("defense", "none"), r["scenario"])
+        c = cells.setdefault(key, {"valid": 0, "exhausted": 0, "attempts": [0], "current": 0})
+        if is_model_error(r):
+            c["current"] += 1
+            c["attempts"][-1] = c["current"]
+            if c["current"] >= MAX_MODEL_ERROR_ATTEMPTS:
+                c["exhausted"] += 1
+                c["current"] = 0
+                c["attempts"].append(0)
+        elif not is_invalid(r):
+            c["valid"] += 1
+            c["current"] = 0
+            c["attempts"].append(0)
+    for c in cells.values():
+        del c["current"]
+        if c["attempts"][-1] == 0:
+            c["attempts"].pop()
+    return cells
+
+
+def prior_model_errors(records: list[dict]) -> dict[int, int]:
+    """id(record) -> model errors that preceded it in the same repetition, for each valid run.
+
+    Derived from run order like progress_of, so no stored record changes. 0 means the
+    repetition was valid at the first scored attempt; quota and other invalid runs in
+    between are ignored.
+    """
+    current: dict[tuple, int] = {}
+    out: dict[int, int] = {}
+    for r in records:
+        if harness_of(r) != HARNESS:
+            continue
+        key = (r.get("round"), r["model"], r.get("stack", "generic"), r.get("defense", "none"), r["scenario"])
+        if is_model_error(r):
+            current[key] = current.get(key, 0) + 1
+            if current[key] >= MAX_MODEL_ERROR_ATTEMPTS:
+                current[key] = 0
+        elif not is_invalid(r):
+            out[id(r)] = current.get(key, 0)
+            current[key] = 0
+    return out
+
+
+def done_counts(paths: list[Path], round_name: str | None = None) -> dict[tuple, int]:
+    """(model, stack, defense, scenario) -> repetitions already executed in these result files:
+    valid runs plus repetitions closed after MAX_MODEL_ERROR_ATTEMPTS model errors.
+
+    With round_name, only runs tagged with that round count, so a new round is not
+    filled up with older runs of the same cell.
+    """
+    return {k: c["valid"] + c["exhausted"] for k, c in cell_progress(paths, round_name).items()}
 
 
 def main() -> None:
@@ -228,6 +342,10 @@ def main() -> None:
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--stack", default="generic", choices=sorted(STACKS),
                     help="payment stack the agent uses (see bench/README.md)")
+    ap.add_argument("--defense", default="none", choices=sorted(DEFENSES),
+                    help="none: base system prompt; prompt: add the spending policy in bench/policies/prompt_policy.txt")
+    ap.add_argument("--round", dest="round_name", metavar="NAME",
+                    help="tag every record with this round; with --resume, count only runs of this round")
     ap.add_argument("--no-refund", action="store_true", help="do not return received sats to alice after each run")
     ap.add_argument("--resume", nargs="*", metavar="RESULTS",
                     help="top up to --repeat valid runs per cell, counting current-harness runs in these files "
@@ -254,16 +372,19 @@ def main() -> None:
     already: dict[tuple, int] = {}
     if args.resume is not None:
         paths = [Path(x) for x in args.resume] or sorted(RESULTS_DIR.glob("run-*.json"))
-        already = done_counts(paths)
+        already = done_counts(paths, args.round_name)
         print(f"resume: counting valid runs in {len(paths)} file(s)", flush=True)
-    todo = {(m, sc["id"]): max(0, args.repeat - already.get((m, args.stack, sc["id"]), 0))
+    print(f"defense: {args.defense} (layer {defense_layer(args.stack, args.defense)})"
+          + (f", round {args.round_name}" if args.round_name else ""), flush=True)
+    todo = {(m, sc["id"]): max(0, args.repeat - already.get((m, args.stack, args.defense, sc["id"]), 0))
             for m in args.models for sc in scenarios}
     total = sum(todo.values())
     print(f"{total} runs -> {out.relative_to(ROOT)} (saved after every run)", flush=True)
 
     def save() -> None:
         tmp = out.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"created": stamp, "stack": args.stack, "defense_layer": STACKS[args.stack][0],
+        tmp.write_text(json.dumps({"created": stamp, "stack": args.stack, "defense": args.defense,
+                                   "defense_layer": defense_layer(args.stack, args.defense), "round": args.round_name,
                                    "complete": len(records) == total, "records": records}, indent=2))
         tmp.replace(out)
     out_of_quota: list[str] = []
@@ -272,9 +393,10 @@ def main() -> None:
         for sc in scenarios:
             if quota_hit:
                 break
-            start = already.get((model, args.stack, sc["id"]), 0)
+            start = already.get((model, args.stack, args.defense, sc["id"]), 0)
             for i in range(start, start + todo[(model, sc["id"])]):
-                rec = run_one(model, sc, do_refund=not args.no_refund, stack=args.stack)
+                rec = run_one(model, sc, do_refund=not args.no_refund, stack=args.stack,
+                              defense=args.defense, round_name=args.round_name)
                 records.append(rec)
                 save()
                 v = rec["verdict"]
@@ -284,7 +406,9 @@ def main() -> None:
                     print(f"[{len(records)}/{total}] {model}: daily quota reached; skipping its remaining runs. "
                           f"Continue later with --resume.", flush=True)
                     break
-                if is_invalid(rec):
+                if is_model_error(rec):
+                    outcome = "MODEL ERROR"
+                elif is_invalid(rec):
                     outcome = "ERROR"
                 elif rec["copy_failed"]:
                     outcome = "COPY FAILED"
@@ -298,6 +422,7 @@ def main() -> None:
                 if rec["copy_ambiguous"]:
                     fix += f"  ({rec['copy_ambiguous']} ambiguous copy)"
                 tag = model if args.stack == "generic" else f"{model} [{args.stack}]"
+                tag += f" /{args.defense}"
                 print(f"[{len(records)}/{total}] {tag:34s} {sc['id']:24s} #{i + 1}  {outcome:16s} "
                       f"lost={v['sats_lost']} sat  {rec['seconds']}s  {rec['tokens']} tok{fix}", flush=True)
                 if rec["agent_error"]:
@@ -315,8 +440,9 @@ def main() -> None:
         print(f"tokens per valid run: mean {sum(toks) // len(toks)}, max {max(toks)}")
     if out_of_quota:
         print(f"daily quota reached for: {', '.join(out_of_quota)}. "
-              f"Next day: python3 -m bench.run --resume --repeat {args.repeat} --models {' '.join(args.models)}")
-    errors = sum(1 for r in records if is_invalid(r) and not r.get("quota_exhausted"))
+              f"Next day: python3 -m bench.run --resume --repeat {args.repeat} --defense {args.defense}"
+              + (f" --round {args.round_name}" if args.round_name else "") + f" --models {' '.join(args.models)}")
+    errors = sum(1 for r in records if is_invalid(r) and not r.get("quota_exhausted") and not is_model_error(r))
     if errors:
         print(f"{errors} run(s) failed before the agent acted; see errors above.")
         sys.exit(1)

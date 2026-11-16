@@ -1,6 +1,12 @@
 .env
+.env.*
+!.env.example
 results/*.json
 !results/.gitkeep
+# Round results are added explicitly (git add -f results/run-<stamp>.json); the report is tracked.
+!results/summary.json
+!results/summary.md
+results/private/
 __pycache__/
 .venv/
 node_modules/

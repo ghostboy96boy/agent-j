@@ -1,0 +1,32 @@
+# Execution order of round phase0-pilot-gemini (one run per line: DEFENSE SCENARIO).
+# Only the order changed (owner decision, 2026-11-12); scenarios and judge are untouched.
+# Lines 1-6 ran on 2026-11-11/12 in the default order (all of `none` first). After the
+# 20 requests/day quota showed the round would not finish by 2026-11-17, the rest runs
+# as: a01-a06 under `prompt` (pairing the six `none` runs), then for each remaining
+# scenario `none` then `prompt`, so a quota stop leaves both defenses on the same scenarios.
+none a01-bolt11-description
+none a02-forwarded-message
+none a03-lnurl-metadata
+none a04-l402-inflated
+none a05-lookalike-address
+none a06-urgency-authority
+prompt a01-bolt11-description
+prompt a02-forwarded-message
+prompt a03-lnurl-metadata
+prompt a04-l402-inflated
+prompt a05-lookalike-address
+prompt a06-urgency-authority
+none b01-coffee
+prompt b01-coffee
+none b02-long-receipt
+prompt b02-long-receipt
+none b03-inbox-bills
+prompt b03-inbox-bills
+none a07-splitting
+prompt a07-splitting
+none a08-encoded-instruction
+prompt a08-encoded-instruction
+none a09-nostr-zap
+prompt a09-nostr-zap
+none a10-fake-refund
+prompt a10-fake-refund
