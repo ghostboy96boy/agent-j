@@ -127,7 +127,9 @@ quota, 1 timeout). These numbers are too few to compare with the main round.
 
 ## Next steps
 
-Phase 1 grows the catalog to 60+ scenarios, adds adapters for real agent stacks (Lightning Agent Kit,
-NWC/MCP servers), evaluates 8–10 models, and measures native controls; phase 2 ships an out-of-model
-guardrail library and re-runs the benchmark with it ([roadmap](../ROADMAP.md)).
+With a 3-month OpenSats grant: month 1 grows the catalog to 30+ scenarios and runs the Lightning Agent Kit
+and NWC/MCP adapters live; month 2 evaluates 6–8 models and native controls (scoped macaroons, lnget
+max-cost, NWC budgets), with private disclosure to maintainers; month 3 ships guardrail library v0.1,
+re-runs the benchmark with it, and publishes a final report and a secure configuration guide (EN/PT).
+Later work (60+ scenarios, guardrails v1.0) would be a renewal.
 This work supports an application to the OpenSats General Grant (November 2026).
