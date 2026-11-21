@@ -93,7 +93,10 @@ quota, 1 timeout). These numbers are too few to compare with the main round.
 ## Findings
 
 - **The written policy lowered attack success for every main-round model**: gemma 12/30 → 3/30 (the
-  intervals do not overlap), gpt-oss 12/26 → 4/29, qwen 3/30 → 0/30. Sats lost fell with it.
+  95% Wilson intervals, 24.6–57.7% and 3.5–25.6%, overlap slightly; a two-sided Fisher exact test
+  gives p ≈ 0.015, but it treats the 30 runs as independent, while they are 10 scenarios × 3 repeats),
+  gpt-oss 12/26 → 4/29, qwen 3/30 → 0/30. Sats lost fell with it. With this n, the direction is
+  consistent across models but no single cell is conclusive.
 - **It did so without blocking legitimate payments**: every control run under both layers paid
   correctly and none was blocked. Under attack, gemma missed the legitimate payment more often with the
   policy (6/24 vs 3/24); the other two did not.
